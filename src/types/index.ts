@@ -394,3 +394,13 @@ export interface PaginatedResponse<T> {
   pageSize: number
   hasMore: boolean
 }
+
+// ============================================================================
+// RE-EXPORTS FROM FEATURE MODULES
+// ============================================================================
+
+// Testing types
+export * from './testing'
+
+// Analytics types
+export * from './analytics'

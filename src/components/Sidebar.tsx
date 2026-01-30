@@ -2,7 +2,7 @@
 
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
-import { FileText, Workflow, Users, Monitor, LogOut } from 'lucide-react'
+import { FileText, Workflow, Users, Monitor, LogOut, BarChart3, FlaskConical, Shield } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useAuth } from '@/providers/AuthProvider'
 
@@ -15,8 +15,11 @@ interface NavItem {
 const navItems: NavItem[] = [
   { href: '/create', label: 'Create a Task', icon: FileText },
   { href: '/workflows', label: 'Your Workflows', icon: Workflow },
+  { href: '/testing', label: 'Testing', icon: FlaskConical },
+  { href: '/analytics', label: 'Analytics', icon: BarChart3 },
   { href: '/team', label: 'Your Team', icon: Users },
   { href: '/control-room', label: 'Control Room', icon: Monitor },
+  { href: '/admin', label: 'Admin', icon: Shield },
 ]
 
 export default function Sidebar() {
