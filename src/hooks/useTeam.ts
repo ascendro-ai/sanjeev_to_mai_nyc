@@ -1,5 +1,6 @@
 'use client'
 
+import { useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { createClient } from '@/lib/supabase/client'
 import type { DigitalWorker, NodeData, Team } from '@/types'
@@ -101,7 +102,8 @@ function buildWorkerNode(worker: DigitalWorker, allWorkers: DigitalWorker[]): No
 }
 
 export function useTeam() {
-  const supabase = createClient()
+  // Memoize Supabase client to prevent re-creation on each render
+  const supabase = useMemo(() => createClient(), [])
   const queryClient = useQueryClient()
 
   // Fetch all digital workers
@@ -304,8 +306,8 @@ export function useTeam() {
     },
   })
 
-  // Get org chart data
-  const orgChartData = toOrgChartData(workers)
+  // Memoize org chart data to prevent unnecessary recalculations
+  const orgChartData = useMemo(() => toOrgChartData(workers), [workers])
 
   return {
     workers,
