@@ -5,6 +5,7 @@ import type {
   AgentConfiguration,
   NodeData,
 } from '@/types'
+import { logger } from '@/lib/logger'
 
 /**
  * Client-side Gemini service.
@@ -48,7 +49,7 @@ export async function extractWorkflowFromConversation(
 
   if (!response.ok) {
     const error = await response.json()
-    console.error('Failed to extract workflow:', error)
+    logger.error('Failed to extract workflow:', error)
     return null
   }
 
@@ -189,7 +190,7 @@ export async function extractPeopleFromConversation(
 
   if (!response.ok) {
     const error = await response.json()
-    console.error('Failed to extract people:', error)
+    logger.error('Failed to extract people:', error)
     return []
   }
 

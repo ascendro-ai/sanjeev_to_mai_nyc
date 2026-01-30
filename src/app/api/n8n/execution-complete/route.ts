@@ -1,3 +1,4 @@
+import { logger } from '@/lib/logger'
 import { createClient } from '@/lib/supabase/server'
 import { NextResponse } from 'next/server'
 import type { NextRequest } from 'next/server'
@@ -80,7 +81,7 @@ export async function POST(request: NextRequest) {
       status,
     })
   } catch (error) {
-    console.error('Error in execution-complete:', error)
+    logger.error('Error in execution-complete:', error)
     return NextResponse.json(
       { error: 'Internal server error' },
       { status: 500 }

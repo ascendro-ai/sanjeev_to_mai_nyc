@@ -1,3 +1,4 @@
+import { logger } from '@/lib/logger'
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
 import { n8nClient } from '@/lib/n8n/client'
@@ -35,7 +36,7 @@ export async function GET() {
       count: mappedWorkflows.length,
     })
   } catch (error) {
-    console.error('Error fetching n8n workflows:', error)
+    logger.error('Error fetching n8n workflows:', error)
     return NextResponse.json(
       { error: 'Failed to fetch workflows from n8n' },
       { status: 500 }
@@ -77,7 +78,7 @@ export async function POST(request: NextRequest) {
         .single()
 
       if (error) {
-        console.error('Error saving imported workflow:', error)
+        logger.error('Error saving imported workflow:', error)
         return NextResponse.json(
           { error: 'Failed to save workflow' },
           { status: 500 }
@@ -153,7 +154,7 @@ export async function POST(request: NextRequest) {
       { status: 400 }
     )
   } catch (error) {
-    console.error('Error in sync POST:', error)
+    logger.error('Error in sync POST:', error)
     return NextResponse.json(
       { error: 'Internal server error' },
       { status: 500 }

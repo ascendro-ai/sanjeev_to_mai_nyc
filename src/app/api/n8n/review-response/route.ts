@@ -1,3 +1,4 @@
+import { logger } from '@/lib/logger'
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
 
@@ -57,7 +58,7 @@ export async function POST(request: NextRequest) {
       .eq('id', reviewId)
 
     if (updateError) {
-      console.error('Error updating review request:', updateError)
+      logger.error('Error updating review request:', updateError)
       return NextResponse.json(
         { error: 'Failed to update review request' },
         { status: 500 }
@@ -95,7 +96,7 @@ export async function POST(request: NextRequest) {
           }),
         })
       } catch (callbackError) {
-        console.error('Error calling n8n callback:', callbackError)
+        logger.error('Error calling n8n callback:', callbackError)
         // Don't fail the request if callback fails
       }
     }
@@ -107,7 +108,7 @@ export async function POST(request: NextRequest) {
       message: `Review ${status} successfully`,
     })
   } catch (error) {
-    console.error('Error in review-response POST:', error)
+    logger.error('Error in review-response POST:', error)
     return NextResponse.json(
       { error: 'Internal server error' },
       { status: 500 }

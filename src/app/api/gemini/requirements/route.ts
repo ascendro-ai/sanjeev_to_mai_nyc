@@ -1,3 +1,4 @@
+import { logger } from '@/lib/logger'
 import { createClient } from '@/lib/supabase/server'
 import { NextResponse } from 'next/server'
 import type { NextRequest } from 'next/server'
@@ -75,7 +76,7 @@ export async function POST(request: NextRequest) {
         )
     }
   } catch (error) {
-    console.error('Error in requirements:', error)
+    logger.error('Error in requirements:', error)
     return NextResponse.json(
       { error: 'Failed to process requirements request', details: String(error) },
       { status: 500 }
@@ -121,7 +122,7 @@ Return ONLY the message text, no JSON, no quotes.`
       success: true,
     })
   } catch (error) {
-    console.error('Error generating initial message:', error)
+    logger.error('Error generating initial message:', error)
     return NextResponse.json({
       message: `Hi! I'm here to help you configure requirements for "${step.label}". What does this step need to accomplish?`,
       success: true,
@@ -182,7 +183,7 @@ Generate a conversational response to the user's last message. Return ONLY the r
       success: true,
     })
   } catch (error) {
-    console.error('Error generating chat response:', error)
+    logger.error('Error generating chat response:', error)
     throw new Error('Failed to generate requirements conversation')
   }
 }
@@ -261,7 +262,7 @@ ${conversationText}`
       success: true,
     })
   } catch (error) {
-    console.error('Error building requirements:', error)
+    logger.error('Error building requirements:', error)
     throw new Error('Failed to build automation requirements')
   }
 }

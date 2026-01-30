@@ -1,3 +1,4 @@
+import { logger } from '@/lib/logger'
 import { createClient } from '@/lib/supabase/server'
 import { NextResponse } from 'next/server'
 import type { NextRequest } from 'next/server'
@@ -63,7 +64,7 @@ export async function POST(
       .single()
 
     if (execError) {
-      console.error('Error creating execution:', execError)
+      logger.error('Error creating execution:', execError)
       return NextResponse.json(
         { error: 'Failed to create execution record' },
         { status: 500 }
@@ -103,7 +104,7 @@ export async function POST(
           message: 'Workflow triggered successfully',
         })
       } catch (n8nError) {
-        console.error('Error triggering n8n workflow:', n8nError)
+        logger.error('Error triggering n8n workflow:', n8nError)
 
         // Update execution status to failed
         await supabase
@@ -129,7 +130,7 @@ export async function POST(
       message: 'Execution record created (no n8n workflow configured)',
     })
   } catch (error) {
-    console.error('Error in webhook handler:', error)
+    logger.error('Error in webhook handler:', error)
     return NextResponse.json(
       { error: 'Internal server error' },
       { status: 500 }

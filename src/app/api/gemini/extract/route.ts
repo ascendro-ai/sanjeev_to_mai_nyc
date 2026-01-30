@@ -1,3 +1,4 @@
+import { logger } from '@/lib/logger'
 import { createClient } from '@/lib/supabase/server'
 import { NextResponse } from 'next/server'
 import type { NextRequest } from 'next/server'
@@ -136,7 +137,7 @@ ${conversationText}`
       success: true,
     })
   } catch (error) {
-    console.error('Error in extract:', error)
+    logger.error('Error in extract:', error)
     return NextResponse.json(
       { error: 'Failed to extract workflow', details: String(error) },
       { status: 500 }

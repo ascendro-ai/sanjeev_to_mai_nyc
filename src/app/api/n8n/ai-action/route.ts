@@ -1,3 +1,4 @@
+import { logger } from '@/lib/logger'
 import { createClient } from '@/lib/supabase/server'
 import { NextResponse } from 'next/server'
 import type { NextRequest } from 'next/server'
@@ -37,7 +38,7 @@ export async function POST(request: NextRequest) {
     try {
       blueprintData = typeof blueprint === 'string' ? JSON.parse(blueprint) : blueprint || blueprintData
     } catch {
-      console.warn('Failed to parse blueprint, using defaults')
+      logger.warn('Failed to parse blueprint, using defaults')
     }
 
     // Parse input data
@@ -45,7 +46,7 @@ export async function POST(request: NextRequest) {
     try {
       inputData = typeof input === 'string' ? JSON.parse(input) : input || {}
     } catch {
-      console.warn('Failed to parse input, using empty object')
+      logger.warn('Failed to parse input, using empty object')
     }
 
     const supabase = await createClient()
@@ -100,7 +101,7 @@ export async function POST(request: NextRequest) {
       message: geminiResponse.message,
     })
   } catch (error) {
-    console.error('Error in ai-action:', error)
+    logger.error('Error in ai-action:', error)
     return NextResponse.json(
       { error: 'Internal server error', details: String(error) },
       { status: 500 }

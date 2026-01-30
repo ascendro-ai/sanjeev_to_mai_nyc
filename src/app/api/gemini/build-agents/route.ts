@@ -1,3 +1,4 @@
+import { logger } from '@/lib/logger'
 import { createClient } from '@/lib/supabase/server'
 import { NextResponse } from 'next/server'
 import type { NextRequest } from 'next/server'
@@ -138,7 +139,7 @@ ${JSON.stringify(workflowInfo, null, 2)}`
       duration,
     })
   } catch (error) {
-    console.error('Error in build-agents:', error)
+    logger.error('Error in build-agents:', error)
     return NextResponse.json(
       { error: 'Failed to build agents', details: String(error) },
       { status: 500 }

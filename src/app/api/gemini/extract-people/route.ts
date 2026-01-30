@@ -1,3 +1,4 @@
+import { logger } from '@/lib/logger'
 import { createClient } from '@/lib/supabase/server'
 import { NextResponse } from 'next/server'
 import type { NextRequest } from 'next/server'
@@ -80,7 +81,7 @@ ${conversationText}`
       success: true,
     })
   } catch (error) {
-    console.error('Error in extract-people:', error)
+    logger.error('Error in extract-people:', error)
     return NextResponse.json(
       { error: 'Failed to extract people', details: String(error) },
       { status: 500 }

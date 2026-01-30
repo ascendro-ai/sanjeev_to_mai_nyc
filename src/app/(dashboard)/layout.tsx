@@ -3,6 +3,7 @@ import { createClient } from '@/lib/supabase/server'
 import Sidebar from '@/components/Sidebar'
 import { AuthProvider } from '@/providers/AuthProvider'
 import { QueryProvider } from '@/providers/QueryProvider'
+import { ErrorBoundary } from '@/components/ErrorBoundary'
 
 export default async function DashboardLayout({
   children,
@@ -22,7 +23,9 @@ export default async function DashboardLayout({
         <div className="flex h-screen bg-gray-50">
           <Sidebar />
           <main className="flex-1 overflow-hidden">
-            {children}
+            <ErrorBoundary>
+              {children}
+            </ErrorBoundary>
           </main>
         </div>
       </AuthProvider>

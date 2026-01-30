@@ -1,3 +1,4 @@
+import { logger } from '@/lib/logger'
 import { createClient } from '@/lib/supabase/server'
 import { NextResponse } from 'next/server'
 import type { NextRequest } from 'next/server'
@@ -75,7 +76,7 @@ export async function POST(request: NextRequest) {
       isComplete,
     })
   } catch (error) {
-    console.error('Error in consult:', error)
+    logger.error('Error in consult:', error)
     return NextResponse.json(
       { error: 'Failed to get consultant response', details: String(error) },
       { status: 500 }

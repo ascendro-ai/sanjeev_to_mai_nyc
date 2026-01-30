@@ -1,3 +1,4 @@
+import { logger } from '@/lib/logger'
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
 
@@ -51,7 +52,7 @@ export async function POST(request: NextRequest) {
         })
 
       if (insertError) {
-        console.error('Error creating execution:', insertError)
+        logger.error('Error creating execution:', insertError)
         return NextResponse.json(
           { error: 'Failed to create execution record' },
           { status: 500 }
@@ -74,7 +75,7 @@ export async function POST(request: NextRequest) {
         .eq('id', executionId)
 
       if (updateError) {
-        console.error('Error updating execution:', updateError)
+        logger.error('Error updating execution:', updateError)
         return NextResponse.json(
           { error: 'Failed to update execution record' },
           { status: 500 }
@@ -109,7 +110,7 @@ export async function POST(request: NextRequest) {
       message: 'Execution updated successfully',
     })
   } catch (error) {
-    console.error('Error in execution-update POST:', error)
+    logger.error('Error in execution-update POST:', error)
     return NextResponse.json(
       { error: 'Internal server error' },
       { status: 500 }
@@ -149,7 +150,7 @@ export async function GET(request: NextRequest) {
 
     return NextResponse.json(execution)
   } catch (error) {
-    console.error('Error in execution-update GET:', error)
+    logger.error('Error in execution-update GET:', error)
     return NextResponse.json(
       { error: 'Internal server error' },
       { status: 500 }
