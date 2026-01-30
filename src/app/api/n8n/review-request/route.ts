@@ -2,11 +2,13 @@ import { logger } from '@/lib/logger'
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
 
+const N8N_API_URL = process.env.N8N_API_URL || 'http://localhost:5678/api/v1'
+
 /**
  * Human Review Node callback endpoint
  * Called by n8n when a workflow hits a Human Review node
  *
- * POST: Create a new review request
+ * POST: Create a new review request (stores execution ID for Wait node resume)
  * GET: Poll review request status
  */
 
@@ -34,7 +36,12 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // Create review request in database
+    // Generate the n8n webhook URL for resuming the Wait node
+    // Format: {n8n_base_url}/webhook-waiting/{execution_id}/review-{step_id}
+    const n8nBaseUrl = N8N_API_URL.replace('/api/v1', '')
+    const resumeWebhookUrl = `${n8nBaseUrl}/webhook-waiting/${executionId}/review-${stepId}`
+
+    // Create review request in database with resume URL
     const { data: reviewRequest, error } = await supabase
       .from('review_requests')
       .insert({
@@ -47,6 +54,8 @@ export async function POST(request: NextRequest) {
           data,
           callbackUrl,
           workflowId,
+          n8nExecutionId: executionId,
+          resumeWebhookUrl,
         },
         status: 'pending',
         chat_history: [],
@@ -62,7 +71,13 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // Also log activity
+    // Update execution status to waiting_review
+    await supabase
+      .from('executions')
+      .update({ status: 'waiting_review', current_step_index: stepId })
+      .eq('n8n_execution_id', executionId)
+
+    // Log activity
     await supabase.from('activity_logs').insert({
       type: 'review_requested',
       worker_name: workerName || 'n8n Workflow',
@@ -70,13 +85,15 @@ export async function POST(request: NextRequest) {
         reviewType,
         stepLabel,
         executionId,
+        reviewId: reviewRequest.id,
       },
     })
 
     return NextResponse.json({
       reviewId: reviewRequest.id,
       status: 'pending',
-      message: 'Review request created successfully',
+      message: 'Review request created successfully. Workflow paused until review is complete.',
+      resumeWebhookUrl, // Return for debugging purposes
     })
   } catch (error) {
     logger.error('Error in review-request POST:', error)

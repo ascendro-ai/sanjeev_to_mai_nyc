@@ -160,7 +160,7 @@ export function useReviewRequests() {
     },
   })
 
-  // Approve a review request
+  // Approve a review request (calls API to resume n8n workflow)
   const approveReview = useMutation({
     mutationFn: async ({
       reviewId,
@@ -171,16 +171,28 @@ export function useReviewRequests() {
       reviewerId: string
       feedback?: string
     }) => {
+      // Call the API endpoint which handles both DB update and n8n workflow resume
+      const response = await fetch('/api/n8n/review-response', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          reviewId,
+          status: 'approved',
+          reviewerId,
+          feedback,
+        }),
+      })
+
+      if (!response.ok) {
+        const error = await response.json()
+        throw new Error(error.error || 'Failed to approve review')
+      }
+
+      // Fetch updated review from database
       const { data, error } = await supabase
         .from('review_requests')
-        .update({
-          status: 'approved',
-          reviewer_id: reviewerId,
-          reviewed_at: new Date().toISOString(),
-          feedback: feedback || null,
-        })
+        .select('*')
         .eq('id', reviewId)
-        .select()
         .single()
 
       if (error) throw error
@@ -189,10 +201,11 @@ export function useReviewRequests() {
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ['review-requests'] })
       queryClient.invalidateQueries({ queryKey: ['review-requests', data.id] })
+      queryClient.invalidateQueries({ queryKey: ['executions'] })
     },
   })
 
-  // Reject a review request
+  // Reject a review request (calls API to stop n8n workflow)
   const rejectReview = useMutation({
     mutationFn: async ({
       reviewId,
@@ -203,16 +216,28 @@ export function useReviewRequests() {
       reviewerId: string
       feedback: string
     }) => {
+      // Call the API endpoint which handles both DB update and n8n workflow stop
+      const response = await fetch('/api/n8n/review-response', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          reviewId,
+          status: 'rejected',
+          reviewerId,
+          feedback,
+        }),
+      })
+
+      if (!response.ok) {
+        const error = await response.json()
+        throw new Error(error.error || 'Failed to reject review')
+      }
+
+      // Fetch updated review from database
       const { data, error } = await supabase
         .from('review_requests')
-        .update({
-          status: 'rejected',
-          reviewer_id: reviewerId,
-          reviewed_at: new Date().toISOString(),
-          feedback,
-        })
+        .select('*')
         .eq('id', reviewId)
-        .select()
         .single()
 
       if (error) throw error
@@ -221,10 +246,11 @@ export function useReviewRequests() {
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ['review-requests'] })
       queryClient.invalidateQueries({ queryKey: ['review-requests', data.id] })
+      queryClient.invalidateQueries({ queryKey: ['executions'] })
     },
   })
 
-  // Edit and approve a review request
+  // Edit and approve a review request (calls API to resume n8n workflow with edited data)
   const editAndApprove = useMutation({
     mutationFn: async ({
       reviewId,
@@ -237,17 +263,29 @@ export function useReviewRequests() {
       editedData: Record<string, unknown>
       feedback?: string
     }) => {
+      // Call the API endpoint which handles both DB update and n8n workflow resume
+      const response = await fetch('/api/n8n/review-response', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          reviewId,
+          status: 'edited',
+          reviewerId,
+          editedData,
+          feedback,
+        }),
+      })
+
+      if (!response.ok) {
+        const error = await response.json()
+        throw new Error(error.error || 'Failed to edit and approve review')
+      }
+
+      // Fetch updated review from database
       const { data, error } = await supabase
         .from('review_requests')
-        .update({
-          status: 'edited',
-          reviewer_id: reviewerId,
-          reviewed_at: new Date().toISOString(),
-          edited_data: editedData,
-          feedback: feedback || null,
-        })
+        .select('*')
         .eq('id', reviewId)
-        .select()
         .single()
 
       if (error) throw error
@@ -256,6 +294,7 @@ export function useReviewRequests() {
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ['review-requests'] })
       queryClient.invalidateQueries({ queryKey: ['review-requests', data.id] })
+      queryClient.invalidateQueries({ queryKey: ['executions'] })
     },
   })
 

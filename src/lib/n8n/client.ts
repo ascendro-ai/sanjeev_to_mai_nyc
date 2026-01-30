@@ -8,30 +8,143 @@
 const N8N_API_URL = process.env.N8N_API_URL || 'http://localhost:5678/api/v1'
 const N8N_API_KEY = process.env.N8N_API_KEY || ''
 
+// Retry configuration
+const DEFAULT_MAX_RETRIES = 3
+const DEFAULT_INITIAL_DELAY_MS = 1000
+const DEFAULT_MAX_DELAY_MS = 10000
+
 interface N8NRequestOptions {
   method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
   path: string
   body?: Record<string, unknown>
+  maxRetries?: number
+  initialDelayMs?: number
 }
 
+/**
+ * Error classification for retry decisions
+ */
+export interface N8NError extends Error {
+  status?: number
+  isTransient: boolean
+  isRateLimited: boolean
+  retryAfter?: number
+}
+
+/**
+ * Check if an error is transient (should be retried)
+ */
+function isTransientError(status: number): boolean {
+  // 5xx errors are typically transient
+  // 429 (rate limit) is also transient
+  // 408 (timeout) is transient
+  return status >= 500 || status === 429 || status === 408
+}
+
+/**
+ * Create an N8NError with proper classification
+ */
+function createN8NError(message: string, status?: number, retryAfter?: number): N8NError {
+  const error = new Error(message) as N8NError
+  error.status = status
+  error.isTransient = status ? isTransientError(status) : false
+  error.isRateLimited = status === 429
+  error.retryAfter = retryAfter
+  return error
+}
+
+/**
+ * Sleep for a specified duration
+ */
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/**
+ * Calculate delay with exponential backoff and jitter
+ */
+function calculateBackoff(attempt: number, initialDelay: number, maxDelay: number): number {
+  const exponentialDelay = initialDelay * Math.pow(2, attempt)
+  const jitter = Math.random() * 0.3 * exponentialDelay // Add up to 30% jitter
+  return Math.min(exponentialDelay + jitter, maxDelay)
+}
+
+/**
+ * Make an n8n API request with retry logic
+ */
 async function n8nRequest<T>(options: N8NRequestOptions): Promise<T> {
-  const { method, path, body } = options
-
-  const response = await fetch(`${N8N_API_URL}${path}`, {
+  const {
     method,
-    headers: {
-      'Content-Type': 'application/json',
-      'X-N8N-API-KEY': N8N_API_KEY,
-    },
-    body: body ? JSON.stringify(body) : undefined,
-  })
+    path,
+    body,
+    maxRetries = DEFAULT_MAX_RETRIES,
+    initialDelayMs = DEFAULT_INITIAL_DELAY_MS,
+  } = options
 
-  if (!response.ok) {
-    const error = await response.text()
-    throw new Error(`n8n API error: ${response.status} - ${error}`)
+  let lastError: N8NError | null = null
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const response = await fetch(`${N8N_API_URL}${path}`, {
+        method,
+        headers: {
+          'Content-Type': 'application/json',
+          'X-N8N-API-KEY': N8N_API_KEY,
+        },
+        body: body ? JSON.stringify(body) : undefined,
+      })
+
+      if (!response.ok) {
+        const errorText = await response.text()
+        const retryAfter = response.headers.get('Retry-After')
+        const retryAfterMs = retryAfter ? parseInt(retryAfter, 10) * 1000 : undefined
+
+        const error = createN8NError(
+          `n8n API error: ${response.status} - ${errorText}`,
+          response.status,
+          retryAfterMs
+        )
+
+        // If it's a transient error and we have retries left, retry
+        if (error.isTransient && attempt < maxRetries) {
+          lastError = error
+          const delay = error.retryAfter || calculateBackoff(attempt, initialDelayMs, DEFAULT_MAX_DELAY_MS)
+          console.warn(`n8n request failed (attempt ${attempt + 1}/${maxRetries + 1}), retrying in ${delay}ms...`, {
+            path,
+            status: response.status,
+          })
+          await sleep(delay)
+          continue
+        }
+
+        throw error
+      }
+
+      return response.json()
+    } catch (error) {
+      // Handle network errors (no response)
+      if (error instanceof TypeError && error.message.includes('fetch')) {
+        const networkError = createN8NError(`Network error connecting to n8n: ${error.message}`)
+        networkError.isTransient = true
+
+        if (attempt < maxRetries) {
+          lastError = networkError
+          const delay = calculateBackoff(attempt, initialDelayMs, DEFAULT_MAX_DELAY_MS)
+          console.warn(`Network error (attempt ${attempt + 1}/${maxRetries + 1}), retrying in ${delay}ms...`)
+          await sleep(delay)
+          continue
+        }
+
+        throw networkError
+      }
+
+      // Re-throw other errors
+      throw error
+    }
   }
 
-  return response.json()
+  // Should never reach here, but just in case
+  throw lastError || new Error('n8n request failed after all retries')
 }
 
 // ============================================================================
@@ -234,7 +347,8 @@ export async function stopExecution(executionId: string): Promise<N8NExecution> 
 import type { Workflow, WorkflowStep } from '@/types'
 
 /**
- * Convert our platform's workflow schema to n8n workflow format
+ * Convert our platform's workflow schema to n8n workflow format.
+ * Handles special cases like human review steps that require multiple n8n nodes.
  */
 export function convertToN8NWorkflow(
   workflow: Workflow,
@@ -243,34 +357,85 @@ export function convertToN8NWorkflow(
   const nodes: N8NNode[] = []
   const connections: N8NConnection = {}
 
+  let xPosition = 100
   let yPosition = 100
+  let lastNodeName: string | null = null
 
   // Process each step and create corresponding n8n nodes
   workflow.steps.forEach((step, index) => {
     const nodeId = `node_${index}`
-    const xPosition = 100 + (index % 3) * 300
 
-    // Alternate Y position for serpentine layout
-    if (index > 0 && index % 3 === 0) {
-      yPosition += 200
+    // Check if this is a human review step (requires Wait node pattern)
+    const isHumanReview = step.type === 'action' && step.assignedTo?.type === 'human'
+
+    if (isHumanReview) {
+      // Human review creates multiple nodes: Request + Wait
+      const reviewNodes = createHumanReviewNodes(
+        step,
+        nodeId,
+        [xPosition, yPosition],
+        platformWebhookUrl,
+        workflow.id
+      )
+
+      // Add all review nodes
+      reviewNodes.forEach((node, nodeIndex) => {
+        nodes.push(node)
+
+        // Connect to previous node
+        if (nodeIndex === 0 && lastNodeName) {
+          if (!connections[lastNodeName]) {
+            connections[lastNodeName] = { main: [[]] }
+          }
+          connections[lastNodeName].main[0].push({
+            node: node.name,
+            type: 'main',
+            index: 0,
+          })
+        }
+
+        // Connect review nodes to each other (Request → Wait)
+        if (nodeIndex > 0) {
+          const prevReviewNode = reviewNodes[nodeIndex - 1]
+          if (!connections[prevReviewNode.name]) {
+            connections[prevReviewNode.name] = { main: [[]] }
+          }
+          connections[prevReviewNode.name].main[0].push({
+            node: node.name,
+            type: 'main',
+            index: 0,
+          })
+        }
+      })
+
+      // Update last node reference to the Wait node (last in the review sequence)
+      lastNodeName = reviewNodes[reviewNodes.length - 1].name
+      xPosition += 500 // Extra space for multi-node step
+    } else {
+      // Single node for other step types
+      const node = createN8NNode(step, nodeId, [xPosition, yPosition], platformWebhookUrl, workflow.id)
+      nodes.push(node)
+
+      // Connect to previous node
+      if (lastNodeName) {
+        if (!connections[lastNodeName]) {
+          connections[lastNodeName] = { main: [[]] }
+        }
+        connections[lastNodeName].main[0].push({
+          node: node.name,
+          type: 'main',
+          index: 0,
+        })
+      }
+
+      lastNodeName = node.name
+      xPosition += 300
     }
 
-    const node = createN8NNode(step, nodeId, [xPosition, yPosition], platformWebhookUrl, workflow.id)
-    nodes.push(node)
-
-    // Create connections (linear flow for now)
-    if (index > 0) {
-      const previousNodeId = `node_${index - 1}`
-      const previousNodeName = nodes[index - 1].name
-
-      if (!connections[previousNodeName]) {
-        connections[previousNodeName] = { main: [] }
-      }
-      connections[previousNodeName].main.push([{
-        node: node.name,
-        type: 'main',
-        index: 0,
-      }])
+    // Move to next row after every 3 positions
+    if ((index + 1) % 3 === 0) {
+      xPosition = 100
+      yPosition += 200
     }
   })
 
@@ -298,7 +463,7 @@ function createN8NNode(
 ): N8NNode {
   switch (step.type) {
     case 'trigger':
-      return createTriggerNode(step, nodeId, position)
+      return createTriggerNode(step, nodeId, position, workflowId)
 
     case 'action':
       if (step.assignedTo?.type === 'human') {
@@ -312,23 +477,188 @@ function createN8NNode(
     case 'end':
       return createEndNode(step, nodeId, position, platformWebhookUrl, workflowId)
 
+    case 'subworkflow':
+      return createSubWorkflowNode(step, nodeId, position)
+
     default:
       return createGenericNode(step, nodeId, position)
+  }
+}
+
+/**
+ * Create a sub-workflow execution node
+ * Allows calling another workflow as a reusable component
+ */
+function createSubWorkflowNode(
+  step: WorkflowStep,
+  nodeId: string,
+  position: [number, number]
+): N8NNode {
+  const subWorkflowId = step.requirements?.subWorkflowId
+  const params = step.requirements?.subWorkflowParams || {}
+
+  if (!subWorkflowId) {
+    // If no sub-workflow configured, create a placeholder NoOp node
+    return {
+      id: nodeId,
+      name: step.label || 'Sub-Workflow (Not Configured)',
+      type: 'n8n-nodes-base.noOp',
+      position,
+      parameters: {},
+      typeVersion: 1,
+    }
+  }
+
+  return {
+    id: nodeId,
+    name: step.label || 'Execute Sub-Workflow',
+    type: 'n8n-nodes-base.executeWorkflow',
+    position,
+    parameters: {
+      source: 'database',
+      workflowId: subWorkflowId,
+      mode: 'once',
+      options: {
+        waitForSubWorkflow: true,
+      },
+      // Pass parameters to the sub-workflow
+      ...(Object.keys(params).length > 0 && {
+        workflowInputs: {
+          mappingMode: 'defineBelow',
+          value: Object.entries(params).reduce((acc, [key, value]) => ({
+            ...acc,
+            [key]: value.startsWith('={{') ? value : `={{ $json.${value} }}`,
+          }), {}),
+        },
+      }),
+    },
+    typeVersion: 1.1,
   }
 }
 
 function createTriggerNode(
   step: WorkflowStep,
   nodeId: string,
-  position: [number, number]
+  position: [number, number],
+  workflowId?: string
 ): N8NNode {
-  // Default to manual trigger, can be extended for schedule/webhook triggers
+  const triggerType = step.requirements?.triggerType || 'manual'
+  const triggerConfig = step.requirements?.triggerConfig || {}
+
+  switch (triggerType) {
+    case 'schedule':
+      return createScheduleTrigger(step, nodeId, position, triggerConfig.schedule)
+
+    case 'webhook':
+      return createWebhookTrigger(step, nodeId, position, triggerConfig.webhookPath, workflowId)
+
+    case 'email':
+      return createEmailTrigger(step, nodeId, position, triggerConfig.emailFilter)
+
+    case 'manual':
+    default:
+      return {
+        id: nodeId,
+        name: step.label || 'Start',
+        type: 'n8n-nodes-base.manualTrigger',
+        position,
+        parameters: {},
+        typeVersion: 1,
+      }
+  }
+}
+
+/**
+ * Create a schedule (cron) trigger node
+ */
+function createScheduleTrigger(
+  step: WorkflowStep,
+  nodeId: string,
+  position: [number, number],
+  cronExpression?: string
+): N8NNode {
+  // Parse cron expression or use defaults
+  // Default: Every day at 9 AM
+  const cron = cronExpression || '0 9 * * *'
+  const [minute, hour, dayOfMonth, month, dayOfWeek] = cron.split(' ')
+
   return {
     id: nodeId,
-    name: step.label || 'Start',
-    type: 'n8n-nodes-base.manualTrigger',
+    name: step.label || 'Schedule Trigger',
+    type: 'n8n-nodes-base.scheduleTrigger',
     position,
-    parameters: {},
+    parameters: {
+      rule: {
+        interval: [
+          {
+            field: 'cronExpression',
+            expression: cron,
+          },
+        ],
+      },
+    },
+    typeVersion: 1.2,
+  }
+}
+
+/**
+ * Create a webhook trigger node
+ */
+function createWebhookTrigger(
+  step: WorkflowStep,
+  nodeId: string,
+  position: [number, number],
+  webhookPath?: string,
+  workflowId?: string
+): N8NNode {
+  return {
+    id: nodeId,
+    name: step.label || 'Webhook Trigger',
+    type: 'n8n-nodes-base.webhook',
+    position,
+    parameters: {
+      path: webhookPath || workflowId || crypto.randomUUID(),
+      httpMethod: 'POST',
+      responseMode: 'onReceived',
+      responseData: 'allEntries',
+      options: {},
+    },
+    typeVersion: 2,
+  }
+}
+
+/**
+ * Create an email trigger node (using Gmail)
+ */
+function createEmailTrigger(
+  step: WorkflowStep,
+  nodeId: string,
+  position: [number, number],
+  emailFilter?: string
+): N8NNode {
+  return {
+    id: nodeId,
+    name: step.label || 'Email Trigger',
+    type: 'n8n-nodes-base.gmailTrigger',
+    position,
+    parameters: {
+      pollTimes: {
+        item: [
+          {
+            mode: 'everyMinute',
+          },
+        ],
+      },
+      filters: {
+        readStatus: 'unread',
+        ...(emailFilter && {
+          sender: emailFilter,
+        }),
+      },
+      options: {
+        downloadAttachments: false,
+      },
+    },
     typeVersion: 1,
   }
 }
@@ -369,6 +699,68 @@ function createAIActionNode(
   }
 }
 
+/**
+ * Create nodes for human review step.
+ * Returns an array of nodes: [HTTP Request to create review, Wait for approval]
+ * This is a special case that generates multiple n8n nodes for a single platform step.
+ */
+function createHumanReviewNodes(
+  step: WorkflowStep,
+  nodeId: string,
+  position: [number, number],
+  platformWebhookUrl: string,
+  workflowId: string
+): N8NNode[] {
+  const requestNodeId = `${nodeId}_request`
+  const waitNodeId = `${nodeId}_wait`
+
+  // Node 1: HTTP Request to create review request in platform
+  const requestNode: N8NNode = {
+    id: requestNodeId,
+    name: `${step.label || 'Human Review'} - Request`,
+    type: 'n8n-nodes-base.httpRequest',
+    position,
+    parameters: {
+      method: 'POST',
+      url: `${platformWebhookUrl}/api/n8n/review-request`,
+      sendBody: true,
+      bodyParameters: {
+        parameters: [
+          { name: 'workflowId', value: workflowId },
+          { name: 'stepId', value: step.id },
+          { name: 'stepLabel', value: step.label },
+          { name: 'reviewType', value: 'approval' },
+          { name: 'workerName', value: step.assignedTo?.agentName || 'Human Reviewer' },
+          { name: 'executionId', value: '={{ $execution.id }}' },
+          { name: 'data', value: '={{ JSON.stringify($json) }}' },
+        ],
+      },
+      options: {
+        response: { response: { responseFormat: 'json' } },
+      },
+    },
+    typeVersion: 4.2,
+  }
+
+  // Node 2: Wait node that pauses until webhook callback
+  const waitNode: N8NNode = {
+    id: waitNodeId,
+    name: `${step.label || 'Human Review'} - Wait`,
+    type: 'n8n-nodes-base.wait',
+    position: [position[0] + 200, position[1]],
+    parameters: {
+      resume: 'webhook',
+      options: {
+        webhookSuffix: `review-${step.id}`,
+      },
+    },
+    typeVersion: 1.1,
+  }
+
+  return [requestNode, waitNode]
+}
+
+// Legacy single-node version for backward compatibility (deprecated)
 function createHumanReviewNode(
   step: WorkflowStep,
   nodeId: string,
@@ -376,7 +768,8 @@ function createHumanReviewNode(
   platformWebhookUrl: string,
   workflowId: string
 ): N8NNode {
-  // Use Wait node that pauses for human review via webhook callback
+  // Use HTTP Request to call our platform's review-request endpoint
+  // Note: This doesn't pause the workflow. Use createHumanReviewNodes for proper Wait pattern.
   return {
     id: nodeId,
     name: step.label || 'Human Review',
@@ -403,6 +796,114 @@ function createHumanReviewNode(
   }
 }
 
+/**
+ * Create decision nodes with conditional branching (IF node).
+ * Supports multiple condition types and routing.
+ */
+function createDecisionNodes(
+  step: WorkflowStep,
+  nodeId: string,
+  position: [number, number],
+  platformWebhookUrl: string,
+  workflowId: string
+): N8NNode[] {
+  const nodes: N8NNode[] = []
+  const conditions = step.requirements?.conditions || []
+
+  // If this decision requires AI evaluation first, add an AI action node
+  if (step.requirements?.useAIForDecision) {
+    const aiNodeId = `${nodeId}_ai`
+    nodes.push({
+      id: aiNodeId,
+      name: `${step.label || 'Decision'} - AI Evaluate`,
+      type: 'n8n-nodes-base.httpRequest',
+      position,
+      parameters: {
+        method: 'POST',
+        url: `${platformWebhookUrl}/api/n8n/ai-action`,
+        sendBody: true,
+        bodyParameters: {
+          parameters: [
+            { name: 'workflowId', value: workflowId },
+            { name: 'stepId', value: step.id },
+            { name: 'stepLabel', value: `Evaluate: ${step.label}` },
+            { name: 'blueprint', value: JSON.stringify(step.requirements?.blueprint || { greenList: [], redList: [] }) },
+            { name: 'input', value: '={{ JSON.stringify($json) }}' },
+            { name: 'returnDecision', value: 'true' },
+          ],
+        },
+        options: {
+          response: { response: { responseFormat: 'json' } },
+        },
+      },
+      typeVersion: 4.2,
+    })
+  }
+
+  // Create the IF node for conditional routing
+  const ifNodeId = `${nodeId}_if`
+  const ifNode: N8NNode = {
+    id: ifNodeId,
+    name: step.label || 'Decision',
+    type: 'n8n-nodes-base.if',
+    position: [position[0] + (step.requirements?.useAIForDecision ? 300 : 0), position[1]],
+    parameters: {
+      conditions: {
+        options: {
+          caseSensitive: true,
+          leftValue: '',
+          typeValidation: 'strict',
+        },
+        conditions: conditions.length > 0
+          ? conditions.map((condition) => ({
+              id: condition.id || crypto.randomUUID(),
+              leftValue: condition.leftValue || '={{ $json.result }}',
+              rightValue: condition.rightValue || 'true',
+              operator: mapConditionOperator(condition.operator || 'equals'),
+            }))
+          : [
+              {
+                id: crypto.randomUUID(),
+                leftValue: '={{ $json.success }}',
+                rightValue: 'true',
+                operator: { type: 'boolean', operation: 'equals' },
+              },
+            ],
+        combinator: 'and',
+      },
+    },
+    typeVersion: 2,
+  }
+  nodes.push(ifNode)
+
+  return nodes
+}
+
+/**
+ * Map condition operators to n8n IF node format
+ */
+function mapConditionOperator(operator: string): { type: string; operation: string } {
+  const operatorMap: Record<string, { type: string; operation: string }> = {
+    equals: { type: 'string', operation: 'equals' },
+    notEquals: { type: 'string', operation: 'notEquals' },
+    contains: { type: 'string', operation: 'contains' },
+    notContains: { type: 'string', operation: 'notContains' },
+    startsWith: { type: 'string', operation: 'startsWith' },
+    endsWith: { type: 'string', operation: 'endsWith' },
+    greaterThan: { type: 'number', operation: 'gt' },
+    lessThan: { type: 'number', operation: 'lt' },
+    greaterThanOrEqual: { type: 'number', operation: 'gte' },
+    lessThanOrEqual: { type: 'number', operation: 'lte' },
+    isEmpty: { type: 'string', operation: 'empty' },
+    isNotEmpty: { type: 'string', operation: 'notEmpty' },
+    isTrue: { type: 'boolean', operation: 'true' },
+    isFalse: { type: 'boolean', operation: 'false' },
+  }
+
+  return operatorMap[operator] || { type: 'string', operation: 'equals' }
+}
+
+// Legacy single-node decision function for backward compatibility
 function createDecisionNode(
   step: WorkflowStep,
   nodeId: string,
@@ -410,7 +911,8 @@ function createDecisionNode(
   platformWebhookUrl: string,
   workflowId: string
 ): N8NNode {
-  // Decision nodes that require human review
+  // Simple decision node - uses HTTP request to evaluate decision
+  // For more complex decisions, use createDecisionNodes
   return {
     id: nodeId,
     name: step.label || 'Decision',

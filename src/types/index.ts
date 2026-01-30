@@ -22,7 +22,7 @@ export interface Workflow {
 export interface WorkflowStep {
   id: string
   label: string
-  type: 'trigger' | 'action' | 'decision' | 'end'
+  type: 'trigger' | 'action' | 'decision' | 'end' | 'subworkflow'
   assignedTo?: {
     type: 'ai' | 'human'
     agentName?: string
@@ -44,6 +44,24 @@ export interface StepRequirements {
     redList: string[]
     outstandingQuestions?: string[]
   }
+  // Trigger configuration
+  triggerType?: 'manual' | 'schedule' | 'webhook' | 'email'
+  triggerConfig?: {
+    schedule?: string // Cron expression
+    webhookPath?: string
+    emailFilter?: string
+  }
+  // Decision/conditional branching configuration
+  conditions?: Array<{
+    id?: string
+    leftValue: string
+    operator: 'equals' | 'notEquals' | 'contains' | 'notContains' | 'startsWith' | 'endsWith' | 'greaterThan' | 'lessThan' | 'greaterThanOrEqual' | 'lessThanOrEqual' | 'isEmpty' | 'isNotEmpty' | 'isTrue' | 'isFalse'
+    rightValue: string
+  }>
+  useAIForDecision?: boolean
+  // Sub-workflow configuration
+  subWorkflowId?: string
+  subWorkflowParams?: Record<string, string>
 }
 
 // ============================================================================

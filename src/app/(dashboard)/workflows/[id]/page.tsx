@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, use } from 'react'
+import { useState, use, useCallback } from 'react'
 import Link from 'next/link'
 import {
   ArrowLeft,
@@ -10,12 +10,27 @@ import {
   Bot,
   User,
   ChevronRight,
+  Save,
+  X,
+  Plus,
+  Trash2,
 } from 'lucide-react'
-import { Button, Card, Modal } from '@/components/ui'
+import { Button, Card, Modal, Input } from '@/components/ui'
 import { cn } from '@/lib/utils'
 import { useWorkflows } from '@/hooks/useWorkflows'
 import { useTeam } from '@/hooks/useTeam'
-import type { WorkflowStep, DigitalWorker } from '@/types'
+import type { WorkflowStep, DigitalWorker, StepRequirements } from '@/types'
+
+// Edit form state type
+interface StepEditForm {
+  label: string
+  type: WorkflowStep['type']
+  assignedToType: 'ai' | 'human' | ''
+  assignedToName: string
+  requirementsText: string
+  greenList: string[]
+  redList: string[]
+}
 
 export default function WorkflowDetailPage({
   params,
@@ -29,6 +44,85 @@ export default function WorkflowDetailPage({
 
   const [selectedStep, setSelectedStep] = useState<WorkflowStep | null>(null)
   const [isAssignModalOpen, setIsAssignModalOpen] = useState(false)
+  const [isEditMode, setIsEditMode] = useState(false)
+  const [editForm, setEditForm] = useState<StepEditForm | null>(null)
+  const [newGreenItem, setNewGreenItem] = useState('')
+  const [newRedItem, setNewRedItem] = useState('')
+
+  // Initialize edit form from selected step
+  const startEditing = useCallback(() => {
+    if (!selectedStep) return
+    setEditForm({
+      label: selectedStep.label,
+      type: selectedStep.type,
+      assignedToType: selectedStep.assignedTo?.type || '',
+      assignedToName: selectedStep.assignedTo?.agentName || '',
+      requirementsText: selectedStep.requirements?.requirementsText || '',
+      greenList: selectedStep.requirements?.blueprint?.greenList || [],
+      redList: selectedStep.requirements?.blueprint?.redList || [],
+    })
+    setIsEditMode(true)
+  }, [selectedStep])
+
+  // Save step changes
+  const handleSaveStep = useCallback(async () => {
+    if (!workflow || !selectedStep || !editForm) return
+
+    const updatedSteps = workflow.steps.map((step) => {
+      if (step.id !== selectedStep.id) return step
+
+      const requirements: StepRequirements = {
+        ...step.requirements,
+        requirementsText: editForm.requirementsText,
+        isComplete: !!(editForm.requirementsText || editForm.greenList.length || editForm.redList.length),
+        blueprint: {
+          greenList: editForm.greenList,
+          redList: editForm.redList,
+        },
+      }
+
+      return {
+        ...step,
+        label: editForm.label,
+        type: editForm.type,
+        assignedTo: editForm.assignedToType ? {
+          type: editForm.assignedToType,
+          agentName: editForm.assignedToName || undefined,
+        } : undefined,
+        requirements,
+      }
+    })
+
+    await updateSteps.mutateAsync({ workflowId: workflow.id, steps: updatedSteps })
+    setIsEditMode(false)
+    setSelectedStep(null)
+  }, [workflow, selectedStep, editForm, updateSteps])
+
+  // Add item to green list
+  const addGreenItem = useCallback(() => {
+    if (!newGreenItem.trim() || !editForm) return
+    setEditForm({ ...editForm, greenList: [...editForm.greenList, newGreenItem.trim()] })
+    setNewGreenItem('')
+  }, [newGreenItem, editForm])
+
+  // Add item to red list
+  const addRedItem = useCallback(() => {
+    if (!newRedItem.trim() || !editForm) return
+    setEditForm({ ...editForm, redList: [...editForm.redList, newRedItem.trim()] })
+    setNewRedItem('')
+  }, [newRedItem, editForm])
+
+  // Remove item from green list
+  const removeGreenItem = useCallback((index: number) => {
+    if (!editForm) return
+    setEditForm({ ...editForm, greenList: editForm.greenList.filter((_, i) => i !== index) })
+  }, [editForm])
+
+  // Remove item from red list
+  const removeRedItem = useCallback((index: number) => {
+    if (!editForm) return
+    setEditForm({ ...editForm, redList: editForm.redList.filter((_, i) => i !== index) })
+  }, [editForm])
 
   if (isLoading) {
     return (
@@ -220,11 +314,15 @@ export default function WorkflowDetailPage({
       {/* Step Detail Modal */}
       <Modal
         isOpen={!!selectedStep}
-        onClose={() => setSelectedStep(null)}
-        title={selectedStep?.label || 'Step Details'}
+        onClose={() => {
+          setSelectedStep(null)
+          setIsEditMode(false)
+          setEditForm(null)
+        }}
+        title={isEditMode ? `Edit: ${selectedStep?.label}` : selectedStep?.label || 'Step Details'}
         size="lg"
       >
-        {selectedStep && (
+        {selectedStep && !isEditMode && (
           <div className="space-y-4">
             <div className="grid grid-cols-2 gap-4">
               <div>
@@ -316,9 +414,172 @@ export default function WorkflowDetailPage({
               <Button variant="secondary" onClick={() => setSelectedStep(null)}>
                 Close
               </Button>
-              <Button>
+              <Button onClick={startEditing}>
                 <Settings className="h-4 w-4 mr-2" />
                 Configure
+              </Button>
+            </div>
+          </div>
+        )}
+
+        {/* Edit Mode Form */}
+        {selectedStep && isEditMode && editForm && (
+          <div className="space-y-4">
+            {/* Step Label */}
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Step Label
+              </label>
+              <Input
+                value={editForm.label}
+                onChange={(e) => setEditForm({ ...editForm, label: e.target.value })}
+                placeholder="Enter step label"
+              />
+            </div>
+
+            {/* Step Type */}
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Step Type
+              </label>
+              <select
+                value={editForm.type}
+                onChange={(e) => setEditForm({ ...editForm, type: e.target.value as WorkflowStep['type'] })}
+                className="w-full px-3 py-2 border border-gray-200 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+              >
+                <option value="trigger">Trigger</option>
+                <option value="action">Action</option>
+                <option value="decision">Decision</option>
+                <option value="end">End</option>
+              </select>
+            </div>
+
+            {/* Assigned To */}
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Assigned To
+                </label>
+                <select
+                  value={editForm.assignedToType}
+                  onChange={(e) => setEditForm({ ...editForm, assignedToType: e.target.value as 'ai' | 'human' | '' })}
+                  className="w-full px-3 py-2 border border-gray-200 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                  <option value="">Not assigned</option>
+                  <option value="ai">AI Agent</option>
+                  <option value="human">Human</option>
+                </select>
+              </div>
+              {editForm.assignedToType && (
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Agent/Person Name
+                  </label>
+                  <Input
+                    value={editForm.assignedToName}
+                    onChange={(e) => setEditForm({ ...editForm, assignedToName: e.target.value })}
+                    placeholder="Enter name"
+                  />
+                </div>
+              )}
+            </div>
+
+            {/* Requirements Text */}
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Requirements / Instructions
+              </label>
+              <textarea
+                value={editForm.requirementsText}
+                onChange={(e) => setEditForm({ ...editForm, requirementsText: e.target.value })}
+                placeholder="Describe what this step should do..."
+                rows={3}
+                className="w-full px-3 py-2 border border-gray-200 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+            </div>
+
+            {/* Blueprint: Green List */}
+            <div>
+              <label className="block text-sm font-medium text-green-700 mb-2">
+                Green List (Allowed Actions)
+              </label>
+              <div className="space-y-2">
+                {editForm.greenList.map((item, idx) => (
+                  <div key={idx} className="flex items-center gap-2">
+                    <span className="w-1.5 h-1.5 bg-green-500 rounded-full flex-shrink-0" />
+                    <span className="flex-1 text-sm">{item}</span>
+                    <button
+                      onClick={() => removeGreenItem(idx)}
+                      className="p-1 text-gray-400 hover:text-red-500"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </button>
+                  </div>
+                ))}
+                <div className="flex gap-2">
+                  <Input
+                    value={newGreenItem}
+                    onChange={(e) => setNewGreenItem(e.target.value)}
+                    placeholder="Add allowed action..."
+                    onKeyDown={(e) => e.key === 'Enter' && (e.preventDefault(), addGreenItem())}
+                  />
+                  <Button variant="secondary" onClick={addGreenItem} size="sm">
+                    <Plus className="h-4 w-4" />
+                  </Button>
+                </div>
+              </div>
+            </div>
+
+            {/* Blueprint: Red List */}
+            <div>
+              <label className="block text-sm font-medium text-red-700 mb-2">
+                Red List (Forbidden Actions)
+              </label>
+              <div className="space-y-2">
+                {editForm.redList.map((item, idx) => (
+                  <div key={idx} className="flex items-center gap-2">
+                    <span className="w-1.5 h-1.5 bg-red-500 rounded-full flex-shrink-0" />
+                    <span className="flex-1 text-sm">{item}</span>
+                    <button
+                      onClick={() => removeRedItem(idx)}
+                      className="p-1 text-gray-400 hover:text-red-500"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </button>
+                  </div>
+                ))}
+                <div className="flex gap-2">
+                  <Input
+                    value={newRedItem}
+                    onChange={(e) => setNewRedItem(e.target.value)}
+                    placeholder="Add forbidden action..."
+                    onKeyDown={(e) => e.key === 'Enter' && (e.preventDefault(), addRedItem())}
+                  />
+                  <Button variant="secondary" onClick={addRedItem} size="sm">
+                    <Plus className="h-4 w-4" />
+                  </Button>
+                </div>
+              </div>
+            </div>
+
+            {/* Actions */}
+            <div className="flex justify-end gap-2 pt-4 border-t border-gray-200">
+              <Button
+                variant="secondary"
+                onClick={() => {
+                  setIsEditMode(false)
+                  setEditForm(null)
+                }}
+              >
+                <X className="h-4 w-4 mr-2" />
+                Cancel
+              </Button>
+              <Button
+                onClick={handleSaveStep}
+                isLoading={updateSteps.isPending}
+              >
+                <Save className="h-4 w-4 mr-2" />
+                Save Changes
               </Button>
             </div>
           </div>
