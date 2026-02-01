@@ -6,12 +6,23 @@
  */
 
 const N8N_API_URL = process.env.N8N_API_URL || 'http://localhost:5678/api/v1'
-const N8N_API_KEY = process.env.N8N_API_KEY || ''
+
+// Issue 7 / N7 fix: Validate API key at module load time
+const N8N_API_KEY_RAW = process.env.N8N_API_KEY
+if (!N8N_API_KEY_RAW && process.env.NODE_ENV === 'production') {
+  throw new Error('N8N_API_KEY environment variable is required in production')
+}
+// For development, allow empty key with warning
+if (!N8N_API_KEY_RAW && process.env.NODE_ENV !== 'production') {
+  console.warn('[n8n-client] N8N_API_KEY not set - n8n API calls will fail')
+}
+const N8N_API_KEY = N8N_API_KEY_RAW || ''
 
 // Retry configuration
 const DEFAULT_MAX_RETRIES = 3
 const DEFAULT_INITIAL_DELAY_MS = 1000
 const DEFAULT_MAX_DELAY_MS = 10000
+const DEFAULT_TIMEOUT_MS = 30000 // 30 second default timeout (4.10 fix)
 
 interface N8NRequestOptions {
   method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
@@ -19,6 +30,7 @@ interface N8NRequestOptions {
   body?: Record<string, unknown>
   maxRetries?: number
   initialDelayMs?: number
+  timeoutMs?: number // Request timeout in milliseconds (4.10 fix)
 }
 
 /**
@@ -70,20 +82,25 @@ function calculateBackoff(attempt: number, initialDelay: number, maxDelay: numbe
 }
 
 /**
- * Make an n8n API request with retry logic
+ * Make an n8n API request with retry logic and timeout (4.10 fix)
  */
-async function n8nRequest<T>(options: N8NRequestOptions): Promise<T> {
+async function n8nRequest<T>(options: N8NRequestOptions): Promise<T | null> {
   const {
     method,
     path,
     body,
     maxRetries = DEFAULT_MAX_RETRIES,
     initialDelayMs = DEFAULT_INITIAL_DELAY_MS,
+    timeoutMs = DEFAULT_TIMEOUT_MS,
   } = options
 
   let lastError: N8NError | null = null
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    // Create abort controller for timeout (4.10 fix)
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs)
+
     try {
       const response = await fetch(`${N8N_API_URL}${path}`, {
         method,
@@ -92,6 +109,7 @@ async function n8nRequest<T>(options: N8NRequestOptions): Promise<T> {
           'X-N8N-API-KEY': N8N_API_KEY,
         },
         body: body ? JSON.stringify(body) : undefined,
+        signal: controller.signal,
       })
 
       if (!response.ok) {
@@ -120,6 +138,9 @@ async function n8nRequest<T>(options: N8NRequestOptions): Promise<T> {
         throw error
       }
 
+      // Clear timeout on successful response (4.10 fix)
+      clearTimeout(timeoutId)
+
       // Handle empty responses (e.g., 204 No Content from DELETE)
       const contentLength = response.headers.get('content-length')
       if (contentLength === '0' || response.status === 204) {
@@ -129,6 +150,25 @@ async function n8nRequest<T>(options: N8NRequestOptions): Promise<T> {
       const text = await response.text()
       return text ? JSON.parse(text) : null
     } catch (error) {
+      // Clear timeout on error (4.10 fix)
+      clearTimeout(timeoutId)
+
+      // Handle timeout/abort errors (4.10 fix)
+      if (error instanceof Error && error.name === 'AbortError') {
+        const timeoutError = createN8NError(`Request timeout after ${timeoutMs}ms: ${path}`, 408)
+        timeoutError.isTransient = true
+
+        if (attempt < maxRetries) {
+          lastError = timeoutError
+          const delay = calculateBackoff(attempt, initialDelayMs, DEFAULT_MAX_DELAY_MS)
+          console.warn(`Request timeout (attempt ${attempt + 1}/${maxRetries + 1}), retrying in ${delay}ms...`, { path })
+          await sleep(delay)
+          continue
+        }
+
+        throw timeoutError
+      }
+
       // Handle network errors (no response)
       if (error instanceof TypeError && error.message.includes('fetch')) {
         const networkError = createN8NError(`Network error connecting to n8n: ${error.message}`)
@@ -221,21 +261,29 @@ export interface N8NExecution {
  * Create a new workflow in n8n
  */
 export async function createWorkflow(workflow: Omit<N8NWorkflow, 'id'>): Promise<N8NWorkflow> {
-  return n8nRequest<N8NWorkflow>({
+  const result = await n8nRequest<N8NWorkflow>({
     method: 'POST',
     path: '/workflows',
     body: workflow as Record<string, unknown>,
   })
+  if (!result) {
+    throw createN8NError('Failed to create workflow: empty response from n8n')
+  }
+  return result
 }
 
 /**
  * Get a workflow by ID
  */
 export async function getWorkflow(workflowId: string): Promise<N8NWorkflow> {
-  return n8nRequest<N8NWorkflow>({
+  const result = await n8nRequest<N8NWorkflow>({
     method: 'GET',
     path: `/workflows/${workflowId}`,
   })
+  if (!result) {
+    throw createN8NError(`Workflow ${workflowId} not found`)
+  }
+  return result
 }
 
 /**
@@ -245,11 +293,15 @@ export async function updateWorkflow(
   workflowId: string,
   workflow: Partial<N8NWorkflow>
 ): Promise<N8NWorkflow> {
-  return n8nRequest<N8NWorkflow>({
+  const result = await n8nRequest<N8NWorkflow>({
     method: 'PATCH',
     path: `/workflows/${workflowId}`,
     body: workflow as Record<string, unknown>,
   })
+  if (!result) {
+    throw createN8NError(`Failed to update workflow ${workflowId}: empty response from n8n`)
+  }
+  return result
 }
 
 /**
@@ -266,10 +318,11 @@ export async function deleteWorkflow(workflowId: string): Promise<void> {
  * List all workflows
  */
 export async function listWorkflows(): Promise<{ data: N8NWorkflow[] }> {
-  return n8nRequest<{ data: N8NWorkflow[] }>({
+  const result = await n8nRequest<{ data: N8NWorkflow[] }>({
     method: 'GET',
     path: '/workflows',
   })
+  return result || { data: [] }
 }
 
 // ============================================================================
@@ -280,20 +333,28 @@ export async function listWorkflows(): Promise<{ data: N8NWorkflow[] }> {
  * Activate a workflow (enable triggers)
  */
 export async function activateWorkflow(workflowId: string): Promise<N8NWorkflow> {
-  return n8nRequest<N8NWorkflow>({
+  const result = await n8nRequest<N8NWorkflow>({
     method: 'POST',
     path: `/workflows/${workflowId}/activate`,
   })
+  if (!result) {
+    throw createN8NError(`Failed to activate workflow ${workflowId}: empty response from n8n`)
+  }
+  return result
 }
 
 /**
  * Deactivate a workflow (disable triggers)
  */
 export async function deactivateWorkflow(workflowId: string): Promise<N8NWorkflow> {
-  return n8nRequest<N8NWorkflow>({
+  const result = await n8nRequest<N8NWorkflow>({
     method: 'POST',
     path: `/workflows/${workflowId}/deactivate`,
   })
+  if (!result) {
+    throw createN8NError(`Failed to deactivate workflow ${workflowId}: empty response from n8n`)
+  }
+  return result
 }
 
 // ============================================================================
@@ -307,21 +368,29 @@ export async function executeWorkflow(
   workflowId: string,
   data?: Record<string, unknown>
 ): Promise<N8NExecution> {
-  return n8nRequest<N8NExecution>({
+  const result = await n8nRequest<N8NExecution>({
     method: 'POST',
     path: `/workflows/${workflowId}/execute`,
     body: data ? { data } : undefined,
   })
+  if (!result) {
+    throw createN8NError(`Failed to execute workflow ${workflowId}: empty response from n8n`)
+  }
+  return result
 }
 
 /**
  * Get execution by ID
  */
 export async function getExecution(executionId: string): Promise<N8NExecution> {
-  return n8nRequest<N8NExecution>({
+  const result = await n8nRequest<N8NExecution>({
     method: 'GET',
     path: `/executions/${executionId}`,
   })
+  if (!result) {
+    throw createN8NError(`Execution ${executionId} not found`)
+  }
+  return result
 }
 
 /**
@@ -331,20 +400,25 @@ export async function listExecutions(workflowId?: string): Promise<{ data: N8NEx
   const path = workflowId
     ? `/executions?workflowId=${workflowId}`
     : '/executions'
-  return n8nRequest<{ data: N8NExecution[] }>({
+  const result = await n8nRequest<{ data: N8NExecution[] }>({
     method: 'GET',
     path,
   })
+  return result || { data: [] }
 }
 
 /**
  * Stop a running execution
  */
 export async function stopExecution(executionId: string): Promise<N8NExecution> {
-  return n8nRequest<N8NExecution>({
+  const result = await n8nRequest<N8NExecution>({
     method: 'POST',
     path: `/executions/${executionId}/stop`,
   })
+  if (!result) {
+    throw createN8NError(`Failed to stop execution ${executionId}: empty response from n8n`)
+  }
+  return result
 }
 
 // ============================================================================
@@ -930,7 +1004,8 @@ function createHumanReviewNodes(
     typeVersion: 4.2,
   }
 
-  // Node 2: Wait node that pauses until webhook callback
+  // Node 2: Wait node that pauses until webhook callback with timeout (4.3 / N6 fix)
+  const timeoutHours = step.requirements?.timeoutHours || 72 // Default 72 hours
   const waitNode: N8NNode = {
     id: waitNodeId,
     name: `${step.label || 'Human Review'} - Wait`,
@@ -941,6 +1016,9 @@ function createHumanReviewNodes(
       options: {
         webhookSuffix: `review-${step.id}`,
       },
+      limitWaitTime: true,              // Enable timeout (4.3 fix)
+      maxWaitTime: timeoutHours,        // Max wait time from step config or default
+      maxWaitTimeUnit: 'hours',         // Wait time unit
     },
     typeVersion: 1.1,
   }
@@ -984,113 +1062,7 @@ function createHumanReviewNode(
   }
 }
 
-/**
- * Create decision nodes with conditional branching (IF node).
- * Supports multiple condition types and routing.
- */
-function createDecisionNodes(
-  step: WorkflowStep,
-  nodeId: string,
-  position: [number, number],
-  platformWebhookUrl: string,
-  workflowId: string
-): N8NNode[] {
-  const nodes: N8NNode[] = []
-  const conditions = step.requirements?.conditions || []
-
-  // If this decision requires AI evaluation first, add an AI action node
-  if (step.requirements?.useAIForDecision) {
-    const aiNodeId = `${nodeId}_ai`
-    nodes.push({
-      id: aiNodeId,
-      name: `${step.label || 'Decision'} - AI Evaluate`,
-      type: 'n8n-nodes-base.httpRequest',
-      position,
-      parameters: {
-        method: 'POST',
-        url: `${platformWebhookUrl}/api/n8n/ai-action`,
-        sendBody: true,
-        bodyParameters: {
-          parameters: [
-            { name: 'workflowId', value: workflowId },
-            { name: 'stepId', value: step.id },
-            { name: 'stepLabel', value: `Evaluate: ${step.label}` },
-            { name: 'blueprint', value: JSON.stringify(step.requirements?.blueprint || { greenList: [], redList: [] }) },
-            { name: 'input', value: '={{ JSON.stringify($json) }}' },
-            { name: 'returnDecision', value: 'true' },
-          ],
-        },
-        options: {
-          response: { response: { responseFormat: 'json' } },
-        },
-      },
-      typeVersion: 4.2,
-    })
-  }
-
-  // Create the IF node for conditional routing
-  const ifNodeId = `${nodeId}_if`
-  const ifNode: N8NNode = {
-    id: ifNodeId,
-    name: step.label || 'Decision',
-    type: 'n8n-nodes-base.if',
-    position: [position[0] + (step.requirements?.useAIForDecision ? 300 : 0), position[1]],
-    parameters: {
-      conditions: {
-        options: {
-          caseSensitive: true,
-          leftValue: '',
-          typeValidation: 'strict',
-        },
-        conditions: conditions.length > 0
-          ? conditions.map((condition) => ({
-              id: condition.id || crypto.randomUUID(),
-              leftValue: condition.leftValue || '={{ $json.result }}',
-              rightValue: condition.rightValue || 'true',
-              operator: mapConditionOperator(condition.operator || 'equals'),
-            }))
-          : [
-              {
-                id: crypto.randomUUID(),
-                leftValue: '={{ $json.success }}',
-                rightValue: 'true',
-                operator: { type: 'boolean', operation: 'equals' },
-              },
-            ],
-        combinator: 'and',
-      },
-    },
-    typeVersion: 2,
-  }
-  nodes.push(ifNode)
-
-  return nodes
-}
-
-/**
- * Map condition operators to n8n IF node format
- */
-function mapConditionOperator(operator: string): { type: string; operation: string } {
-  const operatorMap: Record<string, { type: string; operation: string }> = {
-    equals: { type: 'string', operation: 'equals' },
-    notEquals: { type: 'string', operation: 'notEquals' },
-    contains: { type: 'string', operation: 'contains' },
-    notContains: { type: 'string', operation: 'notContains' },
-    startsWith: { type: 'string', operation: 'startsWith' },
-    endsWith: { type: 'string', operation: 'endsWith' },
-    greaterThan: { type: 'number', operation: 'gt' },
-    lessThan: { type: 'number', operation: 'lt' },
-    greaterThanOrEqual: { type: 'number', operation: 'gte' },
-    lessThanOrEqual: { type: 'number', operation: 'lte' },
-    isEmpty: { type: 'string', operation: 'empty' },
-    isNotEmpty: { type: 'string', operation: 'notEmpty' },
-    isTrue: { type: 'boolean', operation: 'true' },
-    isFalse: { type: 'boolean', operation: 'false' },
-  }
-
-  return operatorMap[operator] || { type: 'string', operation: 'equals' }
-}
-
+// Issue 11 fix: Removed unused createDecisionNodes and mapConditionOperator functions
 // Legacy single-node decision function for backward compatibility
 function createDecisionNode(
   step: WorkflowStep,
@@ -1100,7 +1072,6 @@ function createDecisionNode(
   workflowId: string
 ): N8NNode {
   // Simple decision node - uses HTTP request to evaluate decision
-  // For more complex decisions, use createDecisionNodes
   return {
     id: nodeId,
     name: step.label || 'Decision',

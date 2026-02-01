@@ -89,10 +89,11 @@ export async function POST(request: NextRequest, { params }: ResumeParams) {
 
     if (!n8nResponse.ok) {
       const errorText = await n8nResponse.text()
+      // N4 fix: Don't log full URL which may contain sensitive info
       logger.error('Failed to resume n8n workflow:', {
         status: n8nResponse.status,
         error: errorText,
-        targetUrl,
+        executionId, // Log execution ID instead of full URL
       })
 
       // Don't fail the request - the workflow might have timed out or completed

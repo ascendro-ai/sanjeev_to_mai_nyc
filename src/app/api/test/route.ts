@@ -3,17 +3,21 @@
  *
  * IMPORTANT: These endpoints should only be available in test/development environments.
  * They provide seeding and cleanup utilities for E2E tests.
+ *
+ * In production, returns 404 to hide the endpoint's existence (S6 security fix).
  */
 
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
 
-// Only allow in test/development
-const isTestEnvironment = process.env.NODE_ENV === 'test' || process.env.NODE_ENV === 'development'
-
-function checkTestEnvironment() {
-  if (!isTestEnvironment) {
-    return NextResponse.json({ error: 'Not available in production' }, { status: 403 })
+/**
+ * Check if we're in a non-production environment.
+ * Returns 404 in production to hide the endpoint (security through obscurity + actual protection).
+ */
+function checkTestEnvironment(): NextResponse | null {
+  if (process.env.NODE_ENV === 'production') {
+    // Return 404 instead of 403 to hide endpoint existence
+    return NextResponse.json({ error: 'Not found' }, { status: 404 })
   }
   return null
 }

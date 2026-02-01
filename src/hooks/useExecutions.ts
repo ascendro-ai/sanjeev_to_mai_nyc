@@ -1,5 +1,6 @@
 'use client'
 
+import { useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { createClient } from '@/lib/supabase/client'
 import type { Execution, ExecutionStep } from '@/types'
@@ -76,7 +77,8 @@ function toExecutionStep(db: DbExecutionStep): ExecutionStep {
 }
 
 export function useExecutions() {
-  const supabase = createClient()
+  // Memoize Supabase client to prevent recreation on every render (6.5 fix)
+  const supabase = useMemo(() => createClient(), [])
   const queryClient = useQueryClient()
 
   // Fetch all executions (with optional filters)

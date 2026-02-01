@@ -16,6 +16,19 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
     }
 
+    // A4 fix: Get user's organization for permission filtering
+    const { data: membership } = await supabase
+      .from('organization_members')
+      .select('organization_id')
+      .eq('user_id', user.id)
+      .single()
+
+    if (!membership) {
+      return NextResponse.json({ error: 'No organization found' }, { status: 403 })
+    }
+
+    const organizationId = membership.organization_id
+
     const body: AnalyticsExportRequest = await request.json()
     const { type, filters, format, workerIds } = body
 
@@ -31,10 +44,11 @@ export async function POST(request: NextRequest) {
 
     switch (type) {
       case 'worker_metrics': {
-        // Get worker metrics
+        // Get worker metrics (A4 fix: filter by organization)
         let query = supabase
           .from('digital_workers')
           .select('*')
+          .eq('organization_id', organizationId) // A4 fix: org filter
 
         if (workerIds && workerIds.length > 0) {
           query = query.in('id', workerIds)
@@ -44,23 +58,45 @@ export async function POST(request: NextRequest) {
           query = query.eq('type', filters.workerType)
         }
 
-        const { data: workers } = await query
+        const { data: workers, error: workersError } = await query
 
-        // Get execution stats for each worker
+        // A6 fix: Handle query errors
+        if (workersError) {
+          console.error('Failed to fetch workers for export:', workersError)
+          return NextResponse.json({ error: 'Failed to fetch workers' }, { status: 500 })
+        }
+
+        // A5 fix: Batch fetch all executions for workers to avoid N+1
+        const workerIdList = (workers || []).map(w => w.id)
+        const { data: allExecutions, error: execError } = await supabase
+          .from('executions')
+          .select('worker_id, status, duration_ms')
+          .in('worker_id', workerIdList)
+          .gte('created_at', startDate.toISOString())
+          .lte('created_at', endDate.toISOString())
+          .eq('is_test_run', false)
+
+        // A6 fix: Handle query errors
+        if (execError) {
+          console.error('Failed to fetch executions for export:', execError)
+          return NextResponse.json({ error: 'Failed to fetch executions' }, { status: 500 })
+        }
+
+        // Group executions by worker_id
+        const execsByWorker = (allExecutions || []).reduce((acc, exec) => {
+          if (!acc[exec.worker_id]) acc[exec.worker_id] = []
+          acc[exec.worker_id].push(exec)
+          return acc
+        }, {} as Record<string, typeof allExecutions>)
+
+        // Process each worker
         for (const worker of workers || []) {
-          const { data: executions } = await supabase
-            .from('executions')
-            .select('status, duration_ms')
-            .eq('worker_id', worker.id)
-            .gte('created_at', startDate.toISOString())
-            .lte('created_at', endDate.toISOString())
-            .eq('is_test_run', false)
-
-          const total = executions?.length || 0
-          const successful = executions?.filter(e => e.status === 'completed').length || 0
-          const failed = executions?.filter(e => e.status === 'failed').length || 0
+          const executions = execsByWorker[worker.id] || []
+          const total = executions.length
+          const successful = executions.filter(e => e.status === 'completed').length
+          const failed = executions.filter(e => e.status === 'failed').length
           const avgDuration = total > 0
-            ? Math.round(executions!.reduce((sum, e) => sum + (e.duration_ms || 0), 0) / total)
+            ? Math.round(executions.reduce((sum, e) => sum + (e.duration_ms || 0), 0) / total)
             : 0
 
           data.push({
@@ -110,31 +146,38 @@ export async function POST(request: NextRequest) {
       }
 
       case 'team_analytics': {
-        // Get aggregated team metrics
-        const { data: workers } = await supabase
+        // A4/A5/A6 fix: Get aggregated team metrics with org filter and batch query
+        const { data: workers, error: workersError } = await supabase
           .from('digital_workers')
           .select('id, name, type, status')
+          .eq('organization_id', organizationId) // A4 fix: org filter
 
-        let totalExecutions = 0
-        let totalSuccessful = 0
-        let totalFailed = 0
-        let totalDuration = 0
-
-        for (const worker of workers || []) {
-          const { data: executions } = await supabase
-            .from('executions')
-            .select('status, duration_ms')
-            .eq('worker_id', worker.id)
-            .gte('created_at', startDate.toISOString())
-            .lte('created_at', endDate.toISOString())
-            .eq('is_test_run', false)
-
-          const count = executions?.length || 0
-          totalExecutions += count
-          totalSuccessful += executions?.filter(e => e.status === 'completed').length || 0
-          totalFailed += executions?.filter(e => e.status === 'failed').length || 0
-          totalDuration += executions?.reduce((sum, e) => sum + (e.duration_ms || 0), 0) || 0
+        if (workersError) {
+          console.error('Failed to fetch workers for team analytics:', workersError)
+          return NextResponse.json({ error: 'Failed to fetch workers' }, { status: 500 })
         }
+
+        const workerIdList = (workers || []).map(w => w.id)
+
+        // A5 fix: Single batch query instead of N+1
+        const { data: allExecutions, error: execError } = await supabase
+          .from('executions')
+          .select('status, duration_ms')
+          .in('worker_id', workerIdList)
+          .gte('created_at', startDate.toISOString())
+          .lte('created_at', endDate.toISOString())
+          .eq('is_test_run', false)
+
+        if (execError) {
+          console.error('Failed to fetch executions for team analytics:', execError)
+          return NextResponse.json({ error: 'Failed to fetch executions' }, { status: 500 })
+        }
+
+        const execList = allExecutions || []
+        const totalExecutions = execList.length
+        const totalSuccessful = execList.filter(e => e.status === 'completed').length
+        const totalFailed = execList.filter(e => e.status === 'failed').length
+        const totalDuration = execList.reduce((sum, e) => sum + (e.duration_ms || 0), 0)
 
         data = [{
           period_start: startDate.toISOString(),

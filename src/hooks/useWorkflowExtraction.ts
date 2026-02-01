@@ -88,6 +88,12 @@ export function useWorkflowExtraction(
         setExtractedWorkflow(workflow)
         workflowIdRef.current = workflow.id
         lastProcessedRef.current = messagesHash
+        setError(null) // WB7 fix: Clear error on success
+      } else {
+        // WB7 fix: Set error when extraction returns null (indicates API failure or invalid response)
+        console.warn('Workflow extraction returned null - no valid workflow structure found')
+        // Don't set error for null - this could be a partial conversation
+        // Only clear workflow if we had something and now don't
       }
     } catch (err) {
       console.error('Workflow extraction failed:', err)

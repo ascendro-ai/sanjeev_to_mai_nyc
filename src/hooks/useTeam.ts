@@ -13,6 +13,7 @@ interface DbDigitalWorker {
   manager_id: string | null
   name: string
   type: string | null
+  role: string | null // T6 fix: Add role column
   avatar_url: string | null
   description: string | null
   personality: { tone?: string; verbosity?: string } | null
@@ -21,6 +22,13 @@ interface DbDigitalWorker {
   metadata: Record<string, unknown> | null
   created_at: string | null
   updated_at: string | null
+  // T5 fix: Team relationship data from join
+  teams?: {
+    id: string
+    name: string
+    description: string | null
+    parent_team_id: string | null
+  } | null
 }
 
 interface DbTeam {
@@ -42,6 +50,8 @@ function toDigitalWorker(db: DbDigitalWorker): DigitalWorker {
     managerId: db.manager_id || undefined,
     name: db.name,
     type: (db.type || 'ai') as 'ai' | 'human',
+    // T6 fix: Use persisted role, fall back to description, then default based on type
+    role: db.role || db.description || (db.type === 'ai' ? 'AI Agent' : 'Team Member'),
     avatarUrl: db.avatar_url || undefined,
     description: db.description || undefined,
     personality: db.personality ? {
@@ -49,7 +59,17 @@ function toDigitalWorker(db: DbDigitalWorker): DigitalWorker {
       verbosity: db.personality.verbosity || 'concise',
     } : undefined,
     status: db.status as DigitalWorker['status'],
-    metadata: db.metadata || undefined,
+    metadata: {
+      // Issue 10 fix: Include error_message in metadata if present
+      ...(db.metadata || {}),
+      ...(db.error_message ? { errorMessage: db.error_message } : {}),
+      // T5 fix: Include team info in metadata if present
+      ...(db.teams ? {
+        teamName: db.teams.name,
+        teamDescription: db.teams.description,
+        parentTeamId: db.teams.parent_team_id,
+      } : {}),
+    },
     createdAt: db.created_at ? new Date(db.created_at) : undefined,
     updatedAt: db.updated_at ? new Date(db.updated_at) : undefined,
   }
@@ -92,7 +112,8 @@ function buildWorkerNode(worker: DigitalWorker, allWorkers: DigitalWorker[]): No
   return {
     name: worker.name,
     type: worker.type,
-    role: worker.description || worker.type === 'ai' ? 'AI Agent' : 'Team Member',
+    // T6 fix: Use persisted role from worker
+    role: worker.role,
     status: worker.status as NodeData['status'],
     assignedWorkflows: worker.assignedWorkflows,
     children: directReports.length > 0
@@ -106,7 +127,26 @@ export function useTeam() {
   const supabase = useMemo(() => createClient(), [])
   const queryClient = useQueryClient()
 
-  // Fetch all digital workers
+  // T2 fix: Fetch worker workflow assignments
+  const {
+    data: workflowAssignments = [],
+  } = useQuery({
+    queryKey: ['worker-workflow-assignments'],
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from('worker_workflow_assignments')
+        .select('worker_id, workflow_id')
+        .eq('is_active', true)
+
+      if (error) {
+        console.error('Failed to fetch workflow assignments:', error)
+        return []
+      }
+      return data || []
+    },
+  })
+
+  // Fetch all digital workers with team relationship (T5 fix)
   const {
     data: workers = [],
     isLoading: workersLoading,
@@ -115,15 +155,40 @@ export function useTeam() {
   } = useQuery({
     queryKey: ['digital-workers'],
     queryFn: async () => {
+      // T5 fix: Join with teams table to get team info
       const { data, error } = await supabase
         .from('digital_workers')
-        .select('*')
+        .select(`
+          *,
+          teams (
+            id,
+            name,
+            description,
+            parent_team_id
+          )
+        `)
         .order('created_at', { ascending: true })
 
       if (error) throw error
       return (data as DbDigitalWorker[]).map(toDigitalWorker)
     },
   })
+
+  // T2 fix: Merge workflow assignments into workers
+  const workersWithAssignments = useMemo(() => {
+    const assignmentsByWorker = workflowAssignments.reduce((acc, assignment) => {
+      if (!acc[assignment.worker_id]) {
+        acc[assignment.worker_id] = []
+      }
+      acc[assignment.worker_id].push(assignment.workflow_id)
+      return acc
+    }, {} as Record<string, string[]>)
+
+    return workers.map(worker => ({
+      ...worker,
+      assignedWorkflows: assignmentsByWorker[worker.id] || [],
+    }))
+  }, [workers, workflowAssignments])
 
   // Fetch all teams
   const {
@@ -200,6 +265,7 @@ export function useTeam() {
       if (updates.name !== undefined) dbUpdates.name = updates.name
       if (updates.type !== undefined) dbUpdates.type = updates.type
       if (updates.status !== undefined) dbUpdates.status = updates.status
+      if (updates.role !== undefined) dbUpdates.role = updates.role // T6 fix: Support role updates
       if (updates.description !== undefined) dbUpdates.description = updates.description
       if (updates.avatarUrl !== undefined) dbUpdates.avatar_url = updates.avatarUrl
       if (updates.teamId !== undefined) dbUpdates.team_id = updates.teamId || null
@@ -211,7 +277,15 @@ export function useTeam() {
         .from('digital_workers')
         .update(dbUpdates)
         .eq('id', id)
-        .select()
+        .select(`
+          *,
+          teams (
+            id,
+            name,
+            description,
+            parent_team_id
+          )
+        `)
         .single()
 
       if (error) throw error
@@ -306,12 +380,82 @@ export function useTeam() {
     },
   })
 
-  // Memoize org chart data to prevent unnecessary recalculations
-  const orgChartData = useMemo(() => toOrgChartData(workers), [workers])
+  // T5 fix: Assign worker to team
+  const assignWorkerToTeam = useMutation({
+    mutationFn: async ({ workerId, teamId }: { workerId: string; teamId: string | null }) => {
+      const { data, error } = await supabase
+        .from('digital_workers')
+        .update({
+          team_id: teamId,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', workerId)
+        .select(`
+          *,
+          teams (
+            id,
+            name,
+            description,
+            parent_team_id
+          )
+        `)
+        .single()
+
+      if (error) throw error
+      return toDigitalWorker(data as DbDigitalWorker)
+    },
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ['digital-workers'] })
+      queryClient.invalidateQueries({ queryKey: ['digital-workers', data.id] })
+    },
+  })
+
+  // T5 fix: Group workers by team
+  const workersByTeam = useMemo(() => {
+    const grouped: Record<string, DigitalWorker[]> = {
+      unassigned: [], // Workers with no team
+    }
+
+    // Initialize groups for each team
+    teams.forEach(team => {
+      grouped[team.id] = []
+    })
+
+    // Assign workers to their teams
+    workersWithAssignments.forEach(worker => {
+      if (worker.teamId && grouped[worker.teamId]) {
+        grouped[worker.teamId].push(worker)
+      } else {
+        grouped.unassigned.push(worker)
+      }
+    })
+
+    return grouped
+  }, [workersWithAssignments, teams])
+
+  // T5 fix: Get team hierarchy (teams with their parent relationships)
+  const teamHierarchy = useMemo(() => {
+    const rootTeams = teams.filter(t => !t.parentTeamId)
+
+    function buildTeamTree(team: Team): Team & { children: Team[] } {
+      const children = teams.filter(t => t.parentTeamId === team.id)
+      return {
+        ...team,
+        children: children.map(child => buildTeamTree(child)),
+      }
+    }
+
+    return rootTeams.map(team => buildTeamTree(team))
+  }, [teams])
+
+  // T2/T3 fix: Memoize org chart data with assignments
+  const orgChartData = useMemo(() => toOrgChartData(workersWithAssignments), [workersWithAssignments])
 
   return {
-    workers,
+    workers: workersWithAssignments, // T2 fix: Return workers with assignments
     teams,
+    teamHierarchy, // T5 fix: Teams with hierarchy structure
+    workersByTeam, // T5 fix: Workers grouped by team
     orgChartData,
     isLoading: workersLoading || teamsLoading,
     workersLoading,
@@ -325,5 +469,6 @@ export function useTeam() {
     activateWorker,
     deactivateWorker,
     addTeam,
+    assignWorkerToTeam, // T5 fix: Mutation to assign worker to team
   }
 }

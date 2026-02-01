@@ -43,22 +43,35 @@ export default function StepConfigModal({
 }: StepConfigModalProps) {
   const [nodeInfo, setNodeInfo] = useState<NodeTypeInfo | null>(null)
   const [isLoading, setIsLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null) // WB4 fix: Add error state
   const [selectedNodeType, setSelectedNodeType] = useState<string>('')
   const [config, setConfig] = useState<Record<string, unknown>>({})
   const [showNodeSelector, setShowNodeSelector] = useState(false)
 
-  // Fetch node type info when step changes
+  // Fetch node type info when step changes (WB5 fix: AbortController for race condition)
   useEffect(() => {
     if (!isOpen || !step) return
 
+    const abortController = new AbortController()
+
     const fetchNodeInfo = async () => {
       setIsLoading(true)
+      setError(null) // WB4 fix: Clear previous errors
       try {
         const params = new URLSearchParams({
           stepType: step.type,
           stepLabel: step.label,
         })
-        const response = await fetch(`/api/n8n/node-types?${params}`)
+        const response = await fetch(`/api/n8n/node-types?${params}`, {
+          signal: abortController.signal,
+        })
+
+        // WB3 fix: Check response.ok before parsing
+        if (!response.ok) {
+          const errorData = await response.json().catch(() => ({}))
+          throw new Error(errorData.error || `Failed to fetch node info (${response.status})`)
+        }
+
         const data = await response.json()
         setNodeInfo(data)
         setSelectedNodeType(data.suggestedNode)
@@ -72,34 +85,59 @@ export default function StepConfigModal({
         })
         // Merge with existing requirements
         setConfig({ ...defaultConfig, ...step.requirements?.n8nConfig })
-      } catch (error) {
-        console.error('Error fetching node info:', error)
+      } catch (err) {
+        // WB5 fix: Ignore abort errors
+        if (err instanceof Error && err.name === 'AbortError') return
+        const errorMessage = err instanceof Error ? err.message : 'Failed to load configuration'
+        console.error('Error fetching node info:', err)
+        setError(errorMessage) // WB4 fix: Set error state for UI
       } finally {
         setIsLoading(false)
       }
     }
 
     fetchNodeInfo()
+
+    // WB5 fix: Cleanup function to abort in-flight request
+    return () => abortController.abort()
   }, [isOpen, step])
 
-  // Fetch new schema when node type changes
+  // Fetch new schema when node type changes (WB5 fix: AbortController for race condition)
   useEffect(() => {
     if (!selectedNodeType || !nodeInfo || selectedNodeType === nodeInfo.suggestedNode) return
 
+    const abortController = new AbortController()
+
     const fetchNodeSchema = async () => {
       try {
-        const response = await fetch(`/api/n8n/node-types?nodeType=${selectedNodeType}`)
+        const response = await fetch(`/api/n8n/node-types?nodeType=${selectedNodeType}`, {
+          signal: abortController.signal,
+        })
+
+        // WB3 fix: Check response.ok before parsing
+        if (!response.ok) {
+          const errorData = await response.json().catch(() => ({}))
+          throw new Error(errorData.error || `Failed to fetch node schema (${response.status})`)
+        }
+
         const data = await response.json()
         if (data.parameters) {
           setNodeInfo(prev => prev ? { ...prev, parameters: data.parameters, displayName: data.displayName } : null)
         }
-      } catch (error) {
-        console.error('Error fetching node schema:', error)
+      } catch (err) {
+        // WB5 fix: Ignore abort errors
+        if (err instanceof Error && err.name === 'AbortError') return
+        const errorMessage = err instanceof Error ? err.message : 'Failed to load schema'
+        console.error('Error fetching node schema:', err)
+        setError(errorMessage) // WB4 fix: Set error state
       }
     }
 
     fetchNodeSchema()
-  }, [selectedNodeType])
+
+    // WB5 fix: Cleanup function to abort in-flight request
+    return () => abortController.abort()
+  }, [selectedNodeType, nodeInfo])
 
   const handleConfigChange = (name: string, value: unknown) => {
     setConfig(prev => ({ ...prev, [name]: value }))
@@ -284,6 +322,27 @@ export default function StepConfigModal({
                   to reference data from previous steps.
                 </p>
               </div>
+            </div>
+          ) : error ? (
+            // WB4 fix: Show error state with retry option
+            <div className="text-center py-12">
+              <div className="text-red-400 mb-4">
+                <svg className="h-12 w-12 mx-auto" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                </svg>
+              </div>
+              <p className="text-red-400 font-medium">{error}</p>
+              <button
+                onClick={() => {
+                  setError(null)
+                  setIsLoading(true)
+                  // Re-trigger the fetch
+                  window.location.reload()
+                }}
+                className="mt-4 px-4 py-2 bg-[#2a2a2a] hover:bg-[#3a3a3a] text-gray-300 rounded-lg text-sm transition-colors"
+              >
+                Try Again
+              </button>
             </div>
           ) : (
             <div className="text-center py-12 text-gray-400">

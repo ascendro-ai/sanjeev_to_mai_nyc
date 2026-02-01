@@ -2,13 +2,36 @@
  * n8n Credential Management Utilities
  *
  * Handles credential storage, encryption, and syncing with n8n.
+ * Uses AES-256-GCM for credential encryption (S4 security fix).
  */
 
 import { createClient } from '@/lib/supabase/server'
+import { createCipheriv, createDecipheriv, randomBytes } from 'crypto'
 
 const N8N_API_URL = process.env.N8N_API_URL || 'http://localhost:5678/api/v1'
 const N8N_API_KEY = process.env.N8N_API_KEY || ''
-const ENCRYPTION_KEY = process.env.CREDENTIAL_ENCRYPTION_KEY || 'default-dev-key-change-in-prod'
+const ENCRYPTION_KEY = process.env.CREDENTIAL_ENCRYPTION_KEY
+
+/**
+ * Get the encryption key, validating it exists in production.
+ * Deferred validation to runtime to allow builds without the key set.
+ */
+function getSecureKey(): string {
+  if (ENCRYPTION_KEY) {
+    return ENCRYPTION_KEY
+  }
+
+  // Only warn/error at runtime when encryption is actually used
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error(
+      'CREDENTIAL_ENCRYPTION_KEY environment variable is required in production. ' +
+      'Generate a 32-byte (64 hex character) key using: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'hex\'))"'
+    )
+  }
+
+  console.warn('WARNING: CREDENTIAL_ENCRYPTION_KEY not set. Using insecure default key for development only.')
+  return 'dev-only-key-do-not-use-in-production!!'
+}
 
 // Types
 export interface CredentialType {
@@ -55,24 +78,82 @@ export interface OAuthTokens {
   scope?: string
 }
 
-// Simple encryption (use proper encryption in production)
+/**
+ * Encrypt sensitive data using AES-256-GCM.
+ * Format: base64(iv + authTag + ciphertext)
+ * - IV: 16 bytes (random for each encryption)
+ * - Auth Tag: 16 bytes (for integrity verification)
+ * - Ciphertext: variable length
+ */
 function encrypt(text: string): string {
-  // In production, use proper encryption like AES-256-GCM
-  // This is a placeholder that base64 encodes with a simple XOR
-  const key = ENCRYPTION_KEY
-  let result = ''
-  for (let i = 0; i < text.length; i++) {
-    result += String.fromCharCode(text.charCodeAt(i) ^ key.charCodeAt(i % key.length))
-  }
-  return Buffer.from(result).toString('base64')
+  // Derive a 32-byte key from the configured key
+  // In production, CREDENTIAL_ENCRYPTION_KEY should already be 32 bytes (64 hex chars)
+  const secureKey = getSecureKey()
+  const keyBuffer = Buffer.from(secureKey.padEnd(32, '0').slice(0, 32), 'utf8')
+
+  // Generate random IV for this encryption
+  const iv = randomBytes(16)
+
+  // Create cipher
+  const cipher = createCipheriv('aes-256-gcm', keyBuffer, iv)
+
+  // Encrypt the data
+  const encrypted = Buffer.concat([
+    cipher.update(text, 'utf8'),
+    cipher.final(),
+  ])
+
+  // Get the authentication tag
+  const authTag = cipher.getAuthTag()
+
+  // Combine: IV + authTag + ciphertext
+  const combined = Buffer.concat([iv, authTag, encrypted])
+
+  return combined.toString('base64')
 }
 
+/**
+ * Decrypt data encrypted with AES-256-GCM.
+ * Also supports legacy XOR encryption for backward compatibility.
+ */
 function decrypt(encoded: string): string {
-  const key = ENCRYPTION_KEY
-  const text = Buffer.from(encoded, 'base64').toString()
+  const secureKey = getSecureKey()
+  const buffer = Buffer.from(encoded, 'base64')
+
+  // Check if this is AES-256-GCM format (min 32 bytes: 16 IV + 16 authTag)
+  if (buffer.length >= 32) {
+    try {
+      // Derive the same key
+      const keyBuffer = Buffer.from(secureKey.padEnd(32, '0').slice(0, 32), 'utf8')
+
+      // Extract components
+      const iv = buffer.subarray(0, 16)
+      const authTag = buffer.subarray(16, 32)
+      const ciphertext = buffer.subarray(32)
+
+      // Create decipher
+      const decipher = createDecipheriv('aes-256-gcm', keyBuffer, iv)
+      decipher.setAuthTag(authTag)
+
+      // Decrypt
+      const decrypted = Buffer.concat([
+        decipher.update(ciphertext),
+        decipher.final(),
+      ])
+
+      return decrypted.toString('utf8')
+    } catch {
+      // Fall through to legacy decryption
+    }
+  }
+
+  // Legacy XOR decryption for backward compatibility with existing data
+  // Remove this after migrating all credentials to new format
+  console.warn('Using legacy XOR decryption - credential should be re-encrypted')
+  const text = buffer.toString()
   let result = ''
   for (let i = 0; i < text.length; i++) {
-    result += String.fromCharCode(text.charCodeAt(i) ^ key.charCodeAt(i % key.length))
+    result += String.fromCharCode(text.charCodeAt(i) ^ secureKey.charCodeAt(i % secureKey.length))
   }
   return result
 }

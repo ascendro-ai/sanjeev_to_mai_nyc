@@ -1,5 +1,6 @@
 'use client'
 
+import { useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { createClient } from '@/lib/supabase/client'
 import type { ActivityLog, ActivityLogType } from '@/types'
@@ -33,7 +34,8 @@ function toActivityLog(db: DbActivityLog): ActivityLog {
 }
 
 export function useActivityLogs() {
-  const supabase = createClient()
+  // Memoize Supabase client to prevent recreation on every render (6.5 fix)
+  const supabase = useMemo(() => createClient(), [])
   const queryClient = useQueryClient()
 
   // Fetch recent activity logs

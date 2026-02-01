@@ -1,14 +1,71 @@
+/**
+ * @fileoverview Interactive D3.js organizational chart for digital workers.
+ *
+ * OrgChart visualizes the hierarchy of digital workers (AI agents) and human
+ * team members within an organization. It uses D3.js for rendering an
+ * interactive tree layout with zoom/pan capabilities.
+ *
+ * Features:
+ * - Hierarchical tree visualization of organization structure
+ * - Zoom and pan for navigating large organizations
+ * - Click-to-select nodes for viewing details and configuration
+ * - Status indicators (active, inactive, needs attention)
+ * - Workflow assignment interface for digital workers
+ * - Toggle worker activation status
+ *
+ * Data Flow:
+ * - useTeam hook provides workers and pre-built orgChartData
+ * - D3 hierarchy transforms data into tree structure
+ * - D3 tree layout calculates node positions
+ * - SVG rendering with interactive elements
+ *
+ * @module components/OrgChart
+ *
+ * @example
+ * ```tsx
+ * // In team management page
+ * import OrgChart from '@/components/OrgChart'
+ *
+ * export default function TeamPage() {
+ *   return (
+ *     <div className="h-[600px]">
+ *       <OrgChart className="w-full h-full" />
+ *     </div>
+ *   )
+ * }
+ * ```
+ */
+
 'use client'
 
-import { useEffect, useRef, useState, useMemo } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import * as d3 from 'd3'
 import { ToggleLeft, ToggleRight, X } from 'lucide-react'
 import { Button } from '@/components/ui'
 import { useTeam } from '@/hooks/useTeam'
 import { useWorkflows } from '@/hooks/useWorkflows'
-import type { DigitalWorker, NodeData, Workflow } from '@/types'
+import type { NodeData, Workflow } from '@/types'
 
-// Helper function to get initials from name
+// -----------------------------------------------------------------------------
+// Utility Functions
+// -----------------------------------------------------------------------------
+
+/**
+ * Extracts initials from a name for avatar display.
+ *
+ * For names with multiple parts, uses first and last initial.
+ * For single-word names, uses first two characters.
+ *
+ * @param name - Full name to extract initials from
+ * @returns Two-character uppercase initials
+ *
+ * @example
+ * ```typescript
+ * getInitials('John Doe')     // 'JD'
+ * getInitials('Alice')        // 'AL'
+ * getInitials('Mary Jane Watson') // 'MW'
+ * ```
+ */
 function getInitials(name: string): string {
   const parts = name.split(' ')
   if (parts.length >= 2) {
@@ -17,31 +74,54 @@ function getInitials(name: string): string {
   return name.substring(0, 2).toUpperCase()
 }
 
-// Transform workers to tree structure
-function buildOrgChartData(workers: DigitalWorker[], userName: string = 'You'): NodeData {
-  return {
-    name: userName,
-    type: 'human',
-    role: 'Manager',
-    status: 'active',
-    assignedWorkflows: [],
-    children: workers.map((worker) => ({
-      name: worker.name,
-      type: worker.type,
-      role: worker.description || (worker.type === 'ai' ? 'AI Agent' : 'Team Member'),
-      status: worker.status as NodeData['status'],
-      assignedWorkflows: worker.assignedWorkflows || [],
-    })),
-  }
-}
+// T3 fix: Removed duplicate buildOrgChartData function - using orgChartData from useTeam hook
 
+// -----------------------------------------------------------------------------
+// Types
+// -----------------------------------------------------------------------------
+
+/**
+ * Props for the OrgChart component.
+ */
 interface OrgChartProps {
+  /** Additional CSS classes for the container */
   className?: string
 }
 
+// -----------------------------------------------------------------------------
+// Main Component
+// -----------------------------------------------------------------------------
+
+/**
+ * Interactive organizational chart visualization using D3.js.
+ *
+ * Renders a hierarchical tree of digital workers and human team members.
+ * Supports zoom/pan navigation and click-to-select interaction.
+ *
+ * Implementation Details:
+ * - Uses D3 hierarchy for tree structure
+ * - Tree layout with vertical links (Bezier curves)
+ * - Zoom behavior with 0.1x-3x scale range
+ * - Nodes rendered as cards with avatars and status badges
+ *
+ * Node Interactions:
+ * - Click: Opens details panel with status toggle and workflow assignment
+ * - Hover: Visual feedback (handled by CSS)
+ * - Drag: Pans the entire canvas (via D3 zoom behavior)
+ *
+ * @param props - Component props
+ * @param props.className - Additional CSS classes
+ *
+ * @example
+ * ```tsx
+ * <OrgChart className="h-[500px]" />
+ * ```
+ */
 export default function OrgChart({ className = '' }: OrgChartProps) {
+  // T3 fix: Get orgChartData directly from hook (includes workflow assignments)
   const {
     workers,
+    orgChartData,
     isLoading,
     activateWorker,
     deactivateWorker,
@@ -53,12 +133,6 @@ export default function OrgChart({ className = '' }: OrgChartProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const [selectedNode, setSelectedNode] = useState<NodeData | null>(null)
   const [selectedWorkflowId, setSelectedWorkflowId] = useState<string>('')
-
-  // Build org chart data from workers
-  const orgChartData = useMemo(
-    () => buildOrgChartData(workers || []),
-    [workers]
-  )
 
   // Build D3 org chart
   useEffect(() => {

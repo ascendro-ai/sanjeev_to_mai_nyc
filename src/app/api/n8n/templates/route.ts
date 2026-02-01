@@ -275,7 +275,7 @@ export async function POST(request: NextRequest) {
 /**
  * DELETE /api/n8n/templates
  *
- * Delete a template.
+ * Delete a template. Requires ownership or admin role. (3.5 fix)
  */
 export async function DELETE(request: NextRequest) {
   try {
@@ -286,11 +286,49 @@ export async function DELETE(request: NextRequest) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
     }
 
+    // Get user's organization and role (3.5 fix)
+    const { data: membership } = await supabase
+      .from('organization_members')
+      .select('organization_id, role')
+      .eq('user_id', user.id)
+      .single()
+
+    if (!membership?.organization_id) {
+      return NextResponse.json({ error: 'No organization found' }, { status: 403 })
+    }
+
     const { searchParams } = new URL(request.url)
     const templateId = searchParams.get('id')
 
     if (!templateId) {
       return NextResponse.json({ error: 'Template ID required' }, { status: 400 })
+    }
+
+    // Verify template exists and check ownership (3.5 fix)
+    const { data: template, error: fetchError } = await supabase
+      .from('workflow_templates')
+      .select('created_by, organization_id')
+      .eq('id', templateId)
+      .single()
+
+    if (fetchError || !template) {
+      return NextResponse.json({ error: 'Template not found' }, { status: 404 })
+    }
+
+    // Check organization match (3.5 fix)
+    if (template.organization_id !== membership.organization_id) {
+      return NextResponse.json({ error: 'Template not found' }, { status: 404 })
+    }
+
+    // Check ownership or admin role (3.5 fix)
+    const isOwner = template.created_by === user.id
+    const isAdmin = membership.role === 'admin' || membership.role === 'owner'
+
+    if (!isOwner && !isAdmin) {
+      return NextResponse.json(
+        { error: 'Not authorized to delete this template' },
+        { status: 403 }
+      )
     }
 
     const { error } = await supabase

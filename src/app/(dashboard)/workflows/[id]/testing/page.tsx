@@ -1,12 +1,22 @@
 'use client'
 
-import { use } from 'react'
+import { use, useMemo } from 'react'
 import { ArrowLeft, Settings } from 'lucide-react'
 import Link from 'next/link'
 import { useQuery } from '@tanstack/react-query'
 import { Button } from '@/components/ui'
 import TestRunnerPanel from '@/components/testing/TestRunnerPanel'
 import { createClient } from '@/lib/supabase/client'
+import type { WorkflowStep } from '@/types'
+
+// Type for workflow from database (8.2 fix)
+interface DbWorkflow {
+  id: string
+  name: string
+  description: string | null
+  status: string
+  steps: WorkflowStep[]
+}
 
 interface TestingPageProps {
   params: Promise<{ id: string }>
@@ -14,12 +24,13 @@ interface TestingPageProps {
 
 export default function WorkflowTestingPage({ params }: TestingPageProps) {
   const { id } = use(params)
-  const supabase = createClient()
+  // Memoize Supabase client (6.5 / W9 fix)
+  const supabase = useMemo(() => createClient(), [])
 
   // Fetch workflow details
   const { data: workflow, isLoading } = useQuery({
-    queryKey: ['workflow', id],
-    queryFn: async () => {
+    queryKey: ['workflows', id], // Fix query key to match useWorkflows (2.11 / W3 fix)
+    queryFn: async (): Promise<DbWorkflow | null> => {
       const { data, error } = await supabase
         .from('workflows')
         .select('id, name, description, status, steps')
@@ -27,7 +38,7 @@ export default function WorkflowTestingPage({ params }: TestingPageProps) {
         .single()
 
       if (error) throw error
-      return data
+      return data as DbWorkflow
     },
   })
 
@@ -102,29 +113,28 @@ export default function WorkflowTestingPage({ params }: TestingPageProps) {
               Workflow Steps
             </h2>
             <div className="space-y-2">
-              {(workflow.steps as Array<{ id: string; label: string; type: string }> || []).map(
-                (step, index) => (
-                  <div
-                    key={step.id}
-                    className="p-3 bg-white rounded-lg border border-gray-200"
-                  >
-                    <div className="flex items-center gap-2">
-                      <span className="text-xs font-medium text-gray-400">
-                        {index + 1}
-                      </span>
-                      <span className="text-sm font-medium text-gray-900">
-                        {step.label}
-                      </span>
-                    </div>
-                    <span className="text-xs text-gray-500 capitalize mt-1 block">
-                      {step.type}
+              {/* Type-safe step rendering (8.2 / W7 fix) */}
+              {workflow.steps.map((step, index) => (
+                <div
+                  key={step.id}
+                  className="p-3 bg-white rounded-lg border border-gray-200"
+                >
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-medium text-gray-400">
+                      {index + 1}
+                    </span>
+                    <span className="text-sm font-medium text-gray-900">
+                      {step.label}
                     </span>
                   </div>
-                )
-              )}
+                  <span className="text-xs text-gray-500 capitalize mt-1 block">
+                    {step.type}
+                  </span>
+                </div>
+              ))}
             </div>
 
-            {(workflow.steps as unknown[])?.length === 0 && (
+            {workflow.steps.length === 0 && (
               <p className="text-sm text-gray-500 text-center py-4">
                 No steps defined yet
               </p>

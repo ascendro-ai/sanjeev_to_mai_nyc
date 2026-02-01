@@ -10,6 +10,7 @@ import {
   deleteCredential,
   getOAuthAuthorizationUrl,
 } from '@/lib/n8n/credentials'
+import { strictRateLimiter, applyRateLimit } from '@/lib/rate-limit'
 
 /**
  * GET /api/n8n/credentials
@@ -36,6 +37,19 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ types })
     }
 
+    // Get user's organization first (needed for all operations)
+    const { data: membership } = await supabase
+      .from('organization_members')
+      .select('organization_id')
+      .eq('user_id', user.id)
+      .single()
+
+    if (!membership?.organization_id) {
+      return NextResponse.json({ error: 'User has no organization' }, { status: 400 })
+    }
+
+    const organizationId = membership.organization_id
+
     // Return single credential if ID provided
     const credentialId = searchParams.get('id')
     if (credentialId) {
@@ -43,6 +57,12 @@ export async function GET(request: NextRequest) {
       if (!credential) {
         return NextResponse.json({ error: 'Credential not found' }, { status: 404 })
       }
+
+      // Security check: verify credential belongs to user's organization (3.2 fix)
+      if (credential.organizationId !== organizationId) {
+        return NextResponse.json({ error: 'Credential not found' }, { status: 404 })
+      }
+
       // Don't expose sensitive data
       return NextResponse.json({
         credential: {
@@ -55,19 +75,8 @@ export async function GET(request: NextRequest) {
       })
     }
 
-    // Get user's organization
-    const { data: userData } = await supabase
-      .from('users')
-      .select('organization_id')
-      .eq('id', user.id)
-      .single()
-
-    if (!userData?.organization_id) {
-      return NextResponse.json({ error: 'User has no organization' }, { status: 400 })
-    }
-
     // Return all credentials for the organization
-    const credentials = await getCredentials(userData.organization_id)
+    const credentials = await getCredentials(organizationId)
 
     // Don't expose sensitive data
     return NextResponse.json({
@@ -94,6 +103,10 @@ export async function GET(request: NextRequest) {
  * Create a new credential or get OAuth authorization URL.
  */
 export async function POST(request: NextRequest) {
+  // Apply strict rate limiting for credential creation (5.3 fix)
+  const rateLimitResult = applyRateLimit(request, strictRateLimiter)
+  if (rateLimitResult) return rateLimitResult
+
   try {
     const supabase = await createClient()
     const { data: { user } } = await supabase.auth.getUser()
@@ -106,15 +119,17 @@ export async function POST(request: NextRequest) {
     const { action, credentialType, credentialName, config } = body
 
     // Get user's organization
-    const { data: userData } = await supabase
-      .from('users')
+    const { data: membership } = await supabase
+      .from('organization_members')
       .select('organization_id')
-      .eq('id', user.id)
+      .eq('user_id', user.id)
       .single()
 
-    if (!userData?.organization_id) {
+    if (!membership?.organization_id) {
       return NextResponse.json({ error: 'User has no organization' }, { status: 400 })
     }
+
+    const organizationId = membership.organization_id
 
     // Handle OAuth authorization URL request
     if (action === 'getOAuthUrl') {
@@ -132,7 +147,7 @@ export async function POST(request: NextRequest) {
       // Generate state for CSRF protection
       const state = Buffer.from(JSON.stringify({
         userId: user.id,
-        organizationId: userData.organization_id,
+        organizationId: organizationId,
         credentialType,
         credentialName,
         timestamp: Date.now(),
@@ -180,7 +195,7 @@ export async function POST(request: NextRequest) {
     }
 
     const credential = await createCredential({
-      organizationId: userData.organization_id,
+      organizationId: organizationId,
       credentialType,
       credentialName,
       config,
@@ -211,6 +226,10 @@ export async function POST(request: NextRequest) {
  * Update an existing credential.
  */
 export async function PATCH(request: NextRequest) {
+  // Apply strict rate limiting for credential updates (5.3 fix)
+  const rateLimitResult = applyRateLimit(request, strictRateLimiter)
+  if (rateLimitResult) return rateLimitResult
+
   try {
     const supabase = await createClient()
     const { data: { user } } = await supabase.auth.getUser()
@@ -219,11 +238,28 @@ export async function PATCH(request: NextRequest) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
     }
 
+    // Get user's organization
+    const { data: membership } = await supabase
+      .from('organization_members')
+      .select('organization_id')
+      .eq('user_id', user.id)
+      .single()
+
+    if (!membership?.organization_id) {
+      return NextResponse.json({ error: 'User has no organization' }, { status: 400 })
+    }
+
     const body = await request.json()
     const { credentialId, credentialName, config } = body
 
     if (!credentialId) {
       return NextResponse.json({ error: 'Missing credentialId' }, { status: 400 })
+    }
+
+    // Verify credential belongs to user's organization (3.2 security fix)
+    const existingCredential = await getCredential(credentialId)
+    if (!existingCredential || existingCredential.organizationId !== membership.organization_id) {
+      return NextResponse.json({ error: 'Credential not found' }, { status: 404 })
     }
 
     const credential = await updateCredential(credentialId, {
@@ -255,6 +291,10 @@ export async function PATCH(request: NextRequest) {
  * Delete a credential.
  */
 export async function DELETE(request: NextRequest) {
+  // Apply strict rate limiting for credential deletion (5.3 fix)
+  const rateLimitResult = applyRateLimit(request, strictRateLimiter)
+  if (rateLimitResult) return rateLimitResult
+
   try {
     const supabase = await createClient()
     const { data: { user } } = await supabase.auth.getUser()
@@ -263,11 +303,28 @@ export async function DELETE(request: NextRequest) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
     }
 
+    // Get user's organization
+    const { data: membership } = await supabase
+      .from('organization_members')
+      .select('organization_id')
+      .eq('user_id', user.id)
+      .single()
+
+    if (!membership?.organization_id) {
+      return NextResponse.json({ error: 'User has no organization' }, { status: 400 })
+    }
+
     const { searchParams } = new URL(request.url)
     const credentialId = searchParams.get('id')
 
     if (!credentialId) {
       return NextResponse.json({ error: 'Missing credential ID' }, { status: 400 })
+    }
+
+    // Verify credential belongs to user's organization (3.2 security fix)
+    const existingCredential = await getCredential(credentialId)
+    if (!existingCredential || existingCredential.organizationId !== membership.organization_id) {
+      return NextResponse.json({ error: 'Credential not found' }, { status: 404 })
     }
 
     await deleteCredential(credentialId)

@@ -1,6 +1,7 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
+import { useRouter } from 'next/navigation'
 import { CheckCircle, Clock, AlertCircle, MessageSquare, Check, X } from 'lucide-react'
 import { Button, Card, Modal } from '@/components/ui'
 import { cn } from '@/lib/utils'
@@ -11,7 +12,8 @@ import { useAuth } from '@/providers/AuthProvider'
 import type { ReviewRequest, ActivityLog } from '@/types'
 
 export default function ControlRoomPage() {
-  const { user } = useAuth()
+  const router = useRouter()
+  const { user, isLoading: authLoading } = useAuth()
   const {
     pendingReviews,
     pendingLoading,
@@ -24,6 +26,14 @@ export default function ControlRoomPage() {
   const [selectedReview, setSelectedReview] = useState<ReviewRequest | null>(null)
   const [chatInput, setChatInput] = useState('')
   const [feedback, setFeedback] = useState('')
+  const [actionError, setActionError] = useState<string | null>(null) // CR5 fix: Error state
+
+  // CR6 fix: Redirect to login if not authenticated
+  useEffect(() => {
+    if (!authLoading && !user) {
+      router.replace('/login')
+    }
+  }, [authLoading, user, router])
 
   // Subscribe to real-time updates
   useControlRoomRealtime({
@@ -35,29 +45,52 @@ export default function ControlRoomPage() {
     },
   })
 
+  // CR5 fix: Add error handling to approve action
   const handleApprove = async (review: ReviewRequest) => {
-    if (!user) return
-    await approveReview.mutateAsync({
-      reviewId: review.id,
-      reviewerId: user.id,
-      feedback: feedback || undefined,
-    })
-    setSelectedReview(null)
-    setFeedback('')
-  }
-
-  const handleReject = async (review: ReviewRequest) => {
-    if (!user || !feedback.trim()) {
-      alert('Please provide feedback for rejection')
+    if (!user) {
+      setActionError('You must be logged in to approve reviews')
       return
     }
-    await rejectReview.mutateAsync({
-      reviewId: review.id,
-      reviewerId: user.id,
-      feedback,
-    })
-    setSelectedReview(null)
-    setFeedback('')
+    setActionError(null)
+    try {
+      await approveReview.mutateAsync({
+        reviewId: review.id,
+        reviewerId: user.id,
+        feedback: feedback || undefined,
+      })
+      setSelectedReview(null)
+      setFeedback('')
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Failed to approve review'
+      setActionError(errorMessage)
+      console.error('Error approving review:', error)
+    }
+  }
+
+  // CR5 fix: Add error handling to reject action
+  const handleReject = async (review: ReviewRequest) => {
+    if (!user) {
+      setActionError('You must be logged in to reject reviews')
+      return
+    }
+    if (!feedback.trim()) {
+      setActionError('Please provide feedback for rejection')
+      return
+    }
+    setActionError(null)
+    try {
+      await rejectReview.mutateAsync({
+        reviewId: review.id,
+        reviewerId: user.id,
+        feedback,
+      })
+      setSelectedReview(null)
+      setFeedback('')
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Failed to reject review'
+      setActionError(errorMessage)
+      console.error('Error rejecting review:', error)
+    }
   }
 
   const handleSendChat = async () => {
@@ -83,7 +116,8 @@ export default function ControlRoomPage() {
     }
   }
 
-  if (pendingLoading || logsLoading) {
+  // CR6 fix: Include auth loading in loading state
+  if (authLoading || pendingLoading || logsLoading) {
     return (
       <div className="flex items-center justify-center h-full">
         <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-gray-900" />
@@ -91,8 +125,30 @@ export default function ControlRoomPage() {
     )
   }
 
+  // CR6 fix: Show nothing while redirecting
+  if (!user) {
+    return null
+  }
+
   return (
     <div className="flex flex-col h-full">
+      {/* CR5 fix: Error toast notification */}
+      {actionError && (
+        <div className="fixed top-4 right-4 z-50 bg-red-50 border border-red-200 rounded-lg p-4 shadow-lg flex items-start gap-3 max-w-md">
+          <AlertCircle className="h-5 w-5 text-red-500 flex-shrink-0 mt-0.5" />
+          <div className="flex-1">
+            <p className="text-sm font-medium text-red-800">Action Failed</p>
+            <p className="text-sm text-red-600 mt-0.5">{actionError}</p>
+          </div>
+          <button
+            onClick={() => setActionError(null)}
+            className="text-red-400 hover:text-red-600"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+      )}
+
       {/* Header */}
       <div className="p-6 border-b border-gray-200 bg-white">
         <h1 className="text-2xl font-semibold text-gray-900">Control Room</h1>

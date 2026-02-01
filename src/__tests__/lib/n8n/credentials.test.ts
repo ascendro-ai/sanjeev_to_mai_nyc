@@ -201,7 +201,7 @@ describe('n8n Credentials', () => {
           refresh_token: 'old-refresh-token',
           client_id: 'test-client-id',
           client_secret: 'test-client-secret',
-        }),
+        }).toString(),
       })
 
       expect(response.ok).toBe(true)
@@ -224,7 +224,7 @@ describe('n8n Credentials', () => {
           refresh_token: 'invalid-refresh-token',
           client_id: 'test-client-id',
           client_secret: 'test-client-secret',
-        }),
+        }).toString(),
       })
 
       expect(response.ok).toBe(false)
@@ -260,7 +260,7 @@ describe('n8n Credentials', () => {
           redirect_uri: 'http://localhost:3000/callback',
           client_id: 'test-client-id',
           client_secret: 'test-client-secret',
-        }),
+        }).toString(),
       })
 
       expect(response.ok).toBe(true)

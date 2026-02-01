@@ -20,7 +20,7 @@ export default async function DashboardLayout({
   return (
     <QueryProvider>
       <AuthProvider>
-        <div className="flex h-screen bg-gray-50">
+        <div className="flex h-screen bg-[#0d0d0d]">
           <Sidebar />
           <main className="flex-1 overflow-hidden">
             <ErrorBoundary>

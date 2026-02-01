@@ -3,12 +3,15 @@ import { createClient } from '@/lib/supabase/server'
 import { NextResponse } from 'next/server'
 import type { NextRequest } from 'next/server'
 import { executeWorkflow } from '@/lib/n8n/client'
+import { verifyWebhookSignature } from '@/lib/n8n/webhook-auth'
 
 /**
  * POST /api/n8n/webhook/[workflowId]
  *
  * Webhook endpoint for triggering workflows.
- * Can be called by external services or scheduled triggers.
+ * Supports two authentication methods:
+ * 1. Webhook signature (x-webhook-signature header) - for n8n callbacks
+ * 2. API key (x-api-key header) - for external services
  */
 export async function POST(
   request: NextRequest,
@@ -16,7 +19,40 @@ export async function POST(
 ) {
   try {
     const { workflowId } = await params
-    const body = await request.json().catch(() => ({}))
+
+    // Read body once for verification
+    const bodyText = await request.text()
+
+    // Verify authentication (S1 security fix)
+    // Check webhook signature first, then fall back to API key
+    const signature = request.headers.get('x-webhook-signature')
+    const apiKey = request.headers.get('x-api-key')
+
+    if (signature) {
+      if (!verifyWebhookSignature(bodyText, signature)) {
+        return NextResponse.json(
+          { error: 'Invalid webhook signature' },
+          { status: 401 }
+        )
+      }
+    } else if (apiKey) {
+      // Validate API key against expected value
+      const expectedApiKey = process.env.WORKFLOW_TRIGGER_API_KEY
+      if (!expectedApiKey || apiKey !== expectedApiKey) {
+        return NextResponse.json(
+          { error: 'Invalid API key' },
+          { status: 401 }
+        )
+      }
+    } else if (process.env.NODE_ENV === 'production') {
+      // In production, require authentication
+      return NextResponse.json(
+        { error: 'Authentication required: provide x-webhook-signature or x-api-key header' },
+        { status: 401 }
+      )
+    }
+
+    const body = bodyText ? JSON.parse(bodyText) : {}
 
     if (!workflowId) {
       return NextResponse.json(

@@ -73,6 +73,7 @@ export function useTestRunner(options: UseTestRunnerOptions = {}) {
   })
 
   // Fetch active test run details with polling
+  // H4 fix: Return full TestRunResponse, don't extract .data twice
   const {
     data: activeRunData,
     isLoading: isLoadingActiveRun,
@@ -85,7 +86,9 @@ export function useTestRunner(options: UseTestRunnerOptions = {}) {
         const error = await response.json()
         throw new Error(error.error || 'Failed to fetch test run')
       }
-      return response.json().then(r => r.data)
+      // H4 fix: API returns { data: TestRunResponse }, so extract it properly
+      const json = await response.json()
+      return json.data as TestRunResponse
     },
     enabled: !!activeRunId,
     staleTime: 5000,

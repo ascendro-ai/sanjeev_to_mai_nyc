@@ -100,7 +100,8 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
       }> = {}
 
       // Initialize all days in range
-      for (let d = new Date(startDate); d <= new Date(); d.setDate(d.getDate() + 1)) {
+      const endDate = new Date()
+      for (let d = new Date(startDate); d <= endDate; ) {
         const dateKey = d.toISOString().split('T')[0]
         dailyStats[dateKey] = {
           executions: 0,
@@ -108,6 +109,7 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
           totalDuration: 0,
           stepsExecuted: 0,
         }
+        d.setDate(d.getDate() + 1) // Increment at end of loop
       }
 
       // Aggregate execution data

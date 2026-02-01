@@ -48,6 +48,11 @@ export default function WorkflowDetailPage({
   const [editForm, setEditForm] = useState<StepEditForm | null>(null)
   const [newGreenItem, setNewGreenItem] = useState('')
   const [newRedItem, setNewRedItem] = useState('')
+  const [saveError, setSaveError] = useState<string | null>(null) // W1 fix: Error state for mutations
+  const [saveSuccess, setSaveSuccess] = useState(false) // W1 fix: Success state for mutations
+  const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false) // W5/W8 fix: Track unsaved changes
+  const [showDiscardConfirm, setShowDiscardConfirm] = useState(false) // W8 fix: Confirm dialog state
+  const [pendingStepId, setPendingStepId] = useState<string | null>(null) // W5 fix: Step to switch to after confirm
 
   // Initialize edit form from selected step
   const startEditing = useCallback(() => {
@@ -62,11 +67,60 @@ export default function WorkflowDetailPage({
       redList: selectedStep.requirements?.blueprint?.redList || [],
     })
     setIsEditMode(true)
+    setHasUnsavedChanges(false) // W5 fix: Reset unsaved changes when starting edit
   }, [selectedStep])
 
-  // Save step changes
+  // W5 fix: Function to handle step selection with unsaved changes check
+  const handleStepSelect = useCallback((step: WorkflowStep) => {
+    if (isEditMode && hasUnsavedChanges) {
+      // Store the step to switch to and show confirmation
+      setPendingStepId(step.id)
+      setShowDiscardConfirm(true)
+    } else {
+      setSelectedStep(step)
+      setIsEditMode(false)
+      setEditForm(null)
+      setHasUnsavedChanges(false)
+    }
+  }, [isEditMode, hasUnsavedChanges])
+
+  // W8 fix: Function to handle cancel with unsaved changes check
+  const handleCancelEdit = useCallback(() => {
+    if (hasUnsavedChanges) {
+      setPendingStepId(null) // No pending step, just canceling
+      setShowDiscardConfirm(true)
+    } else {
+      setIsEditMode(false)
+      setEditForm(null)
+    }
+  }, [hasUnsavedChanges])
+
+  // W5/W8 fix: Confirm discard and proceed
+  const confirmDiscard = useCallback(() => {
+    setShowDiscardConfirm(false)
+    setHasUnsavedChanges(false)
+    setIsEditMode(false)
+    setEditForm(null)
+
+    if (pendingStepId) {
+      // W5: Switch to the pending step
+      const step = workflow?.steps.find(s => s.id === pendingStepId)
+      if (step) {
+        setSelectedStep(step)
+      }
+      setPendingStepId(null)
+    } else {
+      // W8: Just canceling edit
+      setSelectedStep(null)
+    }
+  }, [pendingStepId, workflow?.steps])
+
+  // Save step changes - W1 fix: Add error handling
   const handleSaveStep = useCallback(async () => {
     if (!workflow || !selectedStep || !editForm) return
+
+    setSaveError(null)
+    setSaveSuccess(false)
 
     const updatedSteps = workflow.steps.map((step) => {
       if (step.id !== selectedStep.id) return step
@@ -93,35 +147,84 @@ export default function WorkflowDetailPage({
       }
     })
 
-    await updateSteps.mutateAsync({ workflowId: workflow.id, steps: updatedSteps })
-    setIsEditMode(false)
-    setSelectedStep(null)
+    try {
+      await updateSteps.mutateAsync({ workflowId: workflow.id, steps: updatedSteps })
+      setSaveSuccess(true)
+      setHasUnsavedChanges(false) // W5 fix: Clear unsaved changes on save
+      setTimeout(() => setSaveSuccess(false), 3000) // Clear success after 3s
+      setIsEditMode(false)
+      setSelectedStep(null)
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Failed to save changes'
+      setSaveError(errorMessage)
+      console.error('Error saving step:', error)
+    }
   }, [workflow, selectedStep, editForm, updateSteps])
 
-  // Add item to green list
+  // W6 fix: Helper to sanitize and validate list items
+  const sanitizeListItem = (item: string): string => {
+    // Remove HTML tags and trim
+    return item.replace(/<[^>]*>/g, '').trim().slice(0, 200) // Max 200 chars
+  }
+
+  // Add item to green list - W6 fix: Add validation
   const addGreenItem = useCallback(() => {
     if (!newGreenItem.trim() || !editForm) return
-    setEditForm({ ...editForm, greenList: [...editForm.greenList, newGreenItem.trim()] })
+
+    const sanitized = sanitizeListItem(newGreenItem)
+    if (!sanitized) return
+
+    // W6 fix: Check for duplicates (case-insensitive)
+    if (editForm.greenList.some(item => item.toLowerCase() === sanitized.toLowerCase())) {
+      return // Silently ignore duplicates
+    }
+
+    // W6 fix: Limit max items
+    if (editForm.greenList.length >= 50) {
+      setSaveError('Maximum 50 items allowed in green list')
+      return
+    }
+
+    setEditForm({ ...editForm, greenList: [...editForm.greenList, sanitized] })
     setNewGreenItem('')
+    setHasUnsavedChanges(true) // W5 fix: Track changes
   }, [newGreenItem, editForm])
 
-  // Add item to red list
+  // Add item to red list - W6 fix: Add validation
   const addRedItem = useCallback(() => {
     if (!newRedItem.trim() || !editForm) return
-    setEditForm({ ...editForm, redList: [...editForm.redList, newRedItem.trim()] })
+
+    const sanitized = sanitizeListItem(newRedItem)
+    if (!sanitized) return
+
+    // W6 fix: Check for duplicates (case-insensitive)
+    if (editForm.redList.some(item => item.toLowerCase() === sanitized.toLowerCase())) {
+      return // Silently ignore duplicates
+    }
+
+    // W6 fix: Limit max items
+    if (editForm.redList.length >= 50) {
+      setSaveError('Maximum 50 items allowed in red list')
+      return
+    }
+
+    setEditForm({ ...editForm, redList: [...editForm.redList, sanitized] })
     setNewRedItem('')
+    setHasUnsavedChanges(true) // W5 fix: Track changes
   }, [newRedItem, editForm])
 
   // Remove item from green list
   const removeGreenItem = useCallback((index: number) => {
     if (!editForm) return
     setEditForm({ ...editForm, greenList: editForm.greenList.filter((_, i) => i !== index) })
+    setHasUnsavedChanges(true) // W5 fix: Track changes
   }, [editForm])
 
   // Remove item from red list
   const removeRedItem = useCallback((index: number) => {
     if (!editForm) return
     setEditForm({ ...editForm, redList: editForm.redList.filter((_, i) => i !== index) })
+    setHasUnsavedChanges(true) // W5 fix: Track changes
   }, [editForm])
 
   if (isLoading) {
@@ -143,14 +246,34 @@ export default function WorkflowDetailPage({
     )
   }
 
+  // W1 fix: Add error handling to status toggle
   const handleStatusToggle = async () => {
+    setSaveError(null)
     const newStatus = workflow.status === 'active' ? 'paused' : 'active'
-    await updateStatus.mutateAsync({ workflowId: workflow.id, status: newStatus })
+    try {
+      await updateStatus.mutateAsync({ workflowId: workflow.id, status: newStatus })
+      setSaveSuccess(true)
+      setTimeout(() => setSaveSuccess(false), 3000)
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Failed to update status'
+      setSaveError(errorMessage)
+      console.error('Error updating status:', error)
+    }
   }
 
+  // W1 fix: Add error handling to worker assignment
   const handleAssignWorker = async (worker: DigitalWorker) => {
-    await assignWorker.mutateAsync({ workflowId: workflow.id, workerId: worker.id })
-    setIsAssignModalOpen(false)
+    setSaveError(null)
+    try {
+      await assignWorker.mutateAsync({ workflowId: workflow.id, workerId: worker.id })
+      setSaveSuccess(true)
+      setTimeout(() => setSaveSuccess(false), 3000)
+      setIsAssignModalOpen(false)
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Failed to assign worker'
+      setSaveError(errorMessage)
+      console.error('Error assigning worker:', error)
+    }
   }
 
   const getStepTypeColor = (type: WorkflowStep['type']) => {
@@ -170,6 +293,37 @@ export default function WorkflowDetailPage({
 
   return (
     <div className="flex flex-col h-full">
+      {/* W1 fix: Toast notifications for save errors/success */}
+      {saveError && (
+        <div className="fixed top-4 right-4 z-50 bg-red-50 border border-red-200 rounded-lg p-4 shadow-lg flex items-start gap-3 max-w-md animate-in slide-in-from-top">
+          <div className="text-red-500 flex-shrink-0 mt-0.5">
+            <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+          </div>
+          <div className="flex-1">
+            <p className="text-sm font-medium text-red-800">Save Failed</p>
+            <p className="text-sm text-red-600 mt-0.5">{saveError}</p>
+          </div>
+          <button
+            onClick={() => setSaveError(null)}
+            className="text-red-400 hover:text-red-600"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+      )}
+      {saveSuccess && (
+        <div className="fixed top-4 right-4 z-50 bg-green-50 border border-green-200 rounded-lg p-4 shadow-lg flex items-center gap-3 animate-in slide-in-from-top">
+          <div className="text-green-500">
+            <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+            </svg>
+          </div>
+          <p className="text-sm font-medium text-green-800">Changes saved successfully</p>
+        </div>
+      )}
+
       {/* Header */}
       <div className="p-6 border-b border-gray-200 bg-white">
         <div className="flex items-center gap-4 mb-4">
@@ -264,11 +418,11 @@ export default function WorkflowDetailPage({
                 )}
               </div>
 
-              {/* Step card */}
+              {/* Step card - W5 fix: Use handleStepSelect */}
               <Card
                 variant="outlined"
                 className="flex-1 cursor-pointer hover:shadow-sm transition-shadow"
-                onClick={() => setSelectedStep(step)}
+                onClick={() => handleStepSelect(step)}
               >
                 <div className="flex items-start justify-between">
                   <div className="flex-1">
@@ -311,13 +465,19 @@ export default function WorkflowDetailPage({
         </div>
       </div>
 
-      {/* Step Detail Modal */}
+      {/* Step Detail Modal - W5/W8 fix: Check unsaved changes on close */}
       <Modal
         isOpen={!!selectedStep}
         onClose={() => {
-          setSelectedStep(null)
-          setIsEditMode(false)
-          setEditForm(null)
+          if (isEditMode && hasUnsavedChanges) {
+            setPendingStepId(null)
+            setShowDiscardConfirm(true)
+          } else {
+            setSelectedStep(null)
+            setIsEditMode(false)
+            setEditForm(null)
+            setHasUnsavedChanges(false)
+          }
         }}
         title={isEditMode ? `Edit: ${selectedStep?.label}` : selectedStep?.label || 'Step Details'}
         size="lg"
@@ -432,7 +592,10 @@ export default function WorkflowDetailPage({
               </label>
               <Input
                 value={editForm.label}
-                onChange={(e) => setEditForm({ ...editForm, label: e.target.value })}
+                onChange={(e) => {
+                  setEditForm({ ...editForm, label: e.target.value })
+                  setHasUnsavedChanges(true) // W5 fix: Track changes
+                }}
                 placeholder="Enter step label"
               />
             </div>
@@ -444,7 +607,10 @@ export default function WorkflowDetailPage({
               </label>
               <select
                 value={editForm.type}
-                onChange={(e) => setEditForm({ ...editForm, type: e.target.value as WorkflowStep['type'] })}
+                onChange={(e) => {
+                  setEditForm({ ...editForm, type: e.target.value as WorkflowStep['type'] })
+                  setHasUnsavedChanges(true) // W5 fix: Track changes
+                }}
                 className="w-full px-3 py-2 border border-gray-200 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
               >
                 <option value="trigger">Trigger</option>
@@ -462,7 +628,10 @@ export default function WorkflowDetailPage({
                 </label>
                 <select
                   value={editForm.assignedToType}
-                  onChange={(e) => setEditForm({ ...editForm, assignedToType: e.target.value as 'ai' | 'human' | '' })}
+                  onChange={(e) => {
+                    setEditForm({ ...editForm, assignedToType: e.target.value as 'ai' | 'human' | '' })
+                    setHasUnsavedChanges(true) // W5 fix: Track changes
+                  }}
                   className="w-full px-3 py-2 border border-gray-200 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
                 >
                   <option value="">Not assigned</option>
@@ -477,7 +646,10 @@ export default function WorkflowDetailPage({
                   </label>
                   <Input
                     value={editForm.assignedToName}
-                    onChange={(e) => setEditForm({ ...editForm, assignedToName: e.target.value })}
+                    onChange={(e) => {
+                      setEditForm({ ...editForm, assignedToName: e.target.value })
+                      setHasUnsavedChanges(true) // W5 fix: Track changes
+                    }}
                     placeholder="Enter name"
                   />
                 </div>
@@ -491,7 +663,10 @@ export default function WorkflowDetailPage({
               </label>
               <textarea
                 value={editForm.requirementsText}
-                onChange={(e) => setEditForm({ ...editForm, requirementsText: e.target.value })}
+                onChange={(e) => {
+                  setEditForm({ ...editForm, requirementsText: e.target.value })
+                  setHasUnsavedChanges(true) // W5 fix: Track changes
+                }}
                 placeholder="Describe what this step should do..."
                 rows={3}
                 className="w-full px-3 py-2 border border-gray-200 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
@@ -562,14 +737,11 @@ export default function WorkflowDetailPage({
               </div>
             </div>
 
-            {/* Actions */}
+            {/* Actions - W8 fix: Use handleCancelEdit for unsaved changes check */}
             <div className="flex justify-end gap-2 pt-4 border-t border-gray-200">
               <Button
                 variant="secondary"
-                onClick={() => {
-                  setIsEditMode(false)
-                  setEditForm(null)
-                }}
+                onClick={handleCancelEdit}
               >
                 <X className="h-4 w-4 mr-2" />
                 Cancel
@@ -632,6 +804,34 @@ export default function WorkflowDetailPage({
               ))}
             </div>
           )}
+        </div>
+      </Modal>
+
+      {/* W8 fix: Discard Changes Confirmation Modal */}
+      <Modal
+        isOpen={showDiscardConfirm}
+        onClose={() => setShowDiscardConfirm(false)}
+        title="Discard Changes?"
+        size="sm"
+      >
+        <div className="space-y-4">
+          <p className="text-sm text-gray-600">
+            You have unsaved changes. Are you sure you want to discard them?
+          </p>
+          <div className="flex justify-end gap-2">
+            <Button
+              variant="secondary"
+              onClick={() => setShowDiscardConfirm(false)}
+            >
+              Keep Editing
+            </Button>
+            <Button
+              variant="danger"
+              onClick={confirmDiscard}
+            >
+              Discard Changes
+            </Button>
+          </div>
         </div>
       </Modal>
     </div>

@@ -285,7 +285,17 @@ export async function DELETE(request: NextRequest) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
     }
 
-    // TODO: Add admin role check here
+    // Verify admin role (1.6 / S21 security fix)
+    const { data: membership } = await supabase
+      .from('organization_members')
+      .select('role')
+      .eq('user_id', user.id)
+      .single()
+
+    const isAdmin = membership?.role === 'admin' || membership?.role === 'owner'
+    if (!isAdmin) {
+      return NextResponse.json({ error: 'Admin access required' }, { status: 403 })
+    }
 
     // Call cleanup function
     const { data: deletedCount, error } = await supabase.rpc('cleanup_expired_audit_logs')

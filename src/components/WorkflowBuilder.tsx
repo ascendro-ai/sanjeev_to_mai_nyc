@@ -1,3 +1,44 @@
+/**
+ * @fileoverview Main workflow creation interface with AI-assisted design.
+ *
+ * WorkflowBuilder is the primary interface for creating and configuring workflows.
+ * It combines a conversational AI assistant with a visual flowchart editor, enabling
+ * users to describe their automation needs in plain English while seeing the workflow
+ * structure built in real-time.
+ *
+ * Features:
+ * - Chat interface for conversational workflow design with Gemini AI
+ * - Real-time flowchart visualization as workflow is extracted
+ * - Step configuration modal for n8n integration settings
+ * - Validation system ensuring all steps are properly configured
+ * - Workflow activation/deactivation with n8n sync
+ * - Draft saving for work-in-progress workflows
+ *
+ * User Flow:
+ * 1. User describes workflow in chat ("I want to send Slack messages when emails arrive")
+ * 2. Gemini AI asks clarifying questions ("Which Slack channel?")
+ * 3. useWorkflowExtraction hook extracts structured workflow from conversation
+ * 4. WorkflowFlowchart renders visual preview of steps
+ * 5. User clicks steps to configure n8n integration details
+ * 6. User activates workflow when all steps are configured
+ *
+ * @module components/WorkflowBuilder
+ *
+ * @example
+ * ```tsx
+ * // In /workflows/new page
+ * import WorkflowBuilder from '@/components/WorkflowBuilder'
+ *
+ * export default function NewWorkflowPage() {
+ *   return (
+ *     <div className="h-screen">
+ *       <WorkflowBuilder className="h-full" />
+ *     </div>
+ *   )
+ * }
+ * ```
+ */
+
 'use client'
 
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react'
@@ -8,12 +49,30 @@ import WorkflowFlowchart from '@/components/WorkflowFlowchart'
 import StepConfigModal from '@/components/StepConfigModal'
 import { useWorkflowExtraction } from '@/hooks/useWorkflowExtraction'
 import { useWorkflows } from '@/hooks/useWorkflows'
+import { useOrganization } from '@/hooks/useOrganization'
 import { consultWorkflow } from '@/lib/gemini/client'
 import { cn } from '@/lib/utils'
 import type { ConversationMessage, WorkflowStep, Workflow } from '@/types'
 
-// Required parameters for each n8n node type
-// Must match the `required: true` fields in /api/n8n/node-types/route.ts
+// -----------------------------------------------------------------------------
+// Node Type Validation Configuration
+// -----------------------------------------------------------------------------
+
+/**
+ * Required parameters for each n8n node type.
+ *
+ * This configuration ensures that workflow steps have all necessary
+ * parameters before the workflow can be activated. Each key is an n8n
+ * node type identifier, and the value is an array of required parameter names.
+ *
+ * Must be kept in sync with /api/n8n/node-types/route.ts
+ *
+ * @example
+ * ```typescript
+ * // Gmail node requires: operation, to, subject, message
+ * REQUIRED_PARAMS['n8n-nodes-base.gmail'] = ['operation', 'to', 'subject', 'message']
+ * ```
+ */
 const REQUIRED_PARAMS: Record<string, string[]> = {
   // Action nodes
   'n8n-nodes-base.gmail': ['operation', 'to', 'subject', 'message'],
@@ -37,15 +96,58 @@ const REQUIRED_PARAMS: Record<string, string[]> = {
   'n8n-nodes-base.noOp': [], // No required params
 }
 
+// -----------------------------------------------------------------------------
+// Types
+// -----------------------------------------------------------------------------
+
+/**
+ * Result of validating workflow steps before activation.
+ */
 interface ValidationResult {
+  /** True if all steps have required configuration */
   isValid: boolean
+  /** List of steps with missing configuration */
   missingSteps: Array<{
+    /** Step identifier */
     stepId: string
+    /** Human-readable step name */
     stepLabel: string
+    /** Names of missing required fields */
     missingFields: string[]
   }>
 }
 
+/**
+ * Props for the WorkflowBuilder component.
+ */
+interface WorkflowBuilderProps {
+  /** Additional CSS classes */
+  className?: string
+}
+
+// -----------------------------------------------------------------------------
+// Validation Functions
+// -----------------------------------------------------------------------------
+
+/**
+ * Validates that all workflow steps have required n8n configuration.
+ *
+ * Checks each step against REQUIRED_PARAMS to ensure:
+ * 1. The step has an n8n node type selected
+ * 2. All required parameters for that node type have values
+ *
+ * @param steps - Array of workflow steps to validate
+ * @returns Validation result with isValid flag and details of missing fields
+ *
+ * @example
+ * ```typescript
+ * const result = validateWorkflowSteps(workflow.steps)
+ *
+ * if (!result.isValid) {
+ *   console.log('Missing configuration:', result.missingSteps)
+ * }
+ * ```
+ */
 function validateWorkflowSteps(steps: WorkflowStep[]): ValidationResult {
   const missingSteps: ValidationResult['missingSteps'] = []
 
@@ -89,11 +191,35 @@ function validateWorkflowSteps(steps: WorkflowStep[]): ValidationResult {
   }
 }
 
-interface WorkflowBuilderProps {
-  className?: string
-}
+// -----------------------------------------------------------------------------
+// Main Component
+// -----------------------------------------------------------------------------
 
-
+/**
+ * Main workflow creation and configuration interface.
+ *
+ * This component orchestrates the entire workflow creation experience,
+ * combining AI-assisted design with manual configuration capabilities.
+ *
+ * State Management:
+ * - `messages`: Chat history with Gemini AI
+ * - `currentWorkflow`: Saved workflow (null if unsaved draft)
+ * - `extractedWorkflow`: Latest extraction from conversation
+ * - `selectedStepId`: Currently selected step for configuration
+ *
+ * Key Interactions:
+ * - Chat input → consultWorkflow → messages update → useWorkflowExtraction
+ * - Step click → StepConfigModal → handleStepConfigSave → updateSteps
+ * - Activate click → validation check → /api/n8n/activate → status update
+ *
+ * @param props - Component props
+ * @param props.className - Additional CSS classes
+ *
+ * @example
+ * ```tsx
+ * <WorkflowBuilder className="h-full" />
+ * ```
+ */
 export default function WorkflowBuilder({ className = '' }: WorkflowBuilderProps) {
   const router = useRouter()
   const [messages, setMessages] = useState<ConversationMessage[]>([])
@@ -107,9 +233,12 @@ export default function WorkflowBuilder({ className = '' }: WorkflowBuilderProps
   const [showStepConfig, setShowStepConfig] = useState(false)
   const [isActivating, setIsActivating] = useState(false)
 
-  const fileInputRef = useRef<HTMLInputElement>(null)
+  // WB9 fix: Removed unused fileInputRef - file upload not yet implemented
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const hasSavedDraft = useRef(false)
+
+  // Get user's organization
+  const { organizationId, isLoading: orgLoading } = useOrganization()
 
   // Auto-scroll to bottom when messages change
   useEffect(() => {
@@ -142,12 +271,16 @@ export default function WorkflowBuilder({ className = '' }: WorkflowBuilderProps
         })
       } else {
         // Create new draft
+        if (!organizationId) {
+          console.error('No organization found for user')
+          return
+        }
         const result = await addWorkflow.mutateAsync({
           name: extractedWorkflow.name || 'Untitled Workflow',
           description: extractedWorkflow.description,
           steps: extractedWorkflow.steps,
           status: 'draft',
-          organizationId: 'a0000000-0000-0000-0000-000000000001',
+          organizationId,
         })
         setCurrentWorkflow(result)
         hasSavedDraft.current = true
@@ -279,19 +412,19 @@ export default function WorkflowBuilder({ className = '' }: WorkflowBuilderProps
   }, [currentWorkflow])
 
   const handleSaveWorkflow = useCallback(async () => {
-    if (!extractedWorkflow) return
+    if (!extractedWorkflow || !organizationId) return
 
     try {
       const result = await addWorkflow.mutateAsync({
         ...extractedWorkflow,
-        organizationId: 'a0000000-0000-0000-0000-000000000001',
+        organizationId,
       })
 
       router.push(`/workflows/${result.id}`)
     } catch (error) {
       console.error('Error saving workflow:', error)
     }
-  }, [extractedWorkflow, addWorkflow, router])
+  }, [extractedWorkflow, addWorkflow, router, organizationId])
 
   const handleSend = () => {
     if (!input.trim() || isLoading) return
@@ -521,27 +654,20 @@ export default function WorkflowBuilder({ className = '' }: WorkflowBuilderProps
                   <Plus className="h-5 w-5" />
                 </button>
 
+                {/* WB9 fix: File upload disabled - not yet implemented */}
                 {showMenu && (
                   <div className="absolute bottom-full left-0 mb-2 bg-[#3a3a3a] border border-[#4a4a4a] rounded-lg shadow-lg py-1 min-w-[150px] z-10">
                     <button
-                      onClick={() => {
-                        fileInputRef.current?.click()
-                        setShowMenu(false)
-                      }}
-                      className="w-full px-4 py-2 text-sm text-left text-gray-300 hover:bg-[#4a4a4a] flex items-center gap-2"
+                      disabled
+                      className="w-full px-4 py-2 text-sm text-left text-gray-500 cursor-not-allowed flex items-center gap-2"
+                      title="File attachments coming soon"
                     >
                       <Paperclip className="h-4 w-4" />
                       Attach file
+                      <span className="text-xs text-gray-600 ml-auto">(Soon)</span>
                     </button>
                   </div>
                 )}
-
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  className="hidden"
-                  multiple
-                />
               </div>
 
               {/* Text input */}
@@ -578,18 +704,22 @@ export default function WorkflowBuilder({ className = '' }: WorkflowBuilderProps
         </div>
       </div>
 
-      {/* Step Configuration Modal */}
-      {selectedStepId && (
-        <StepConfigModal
-          step={steps.find(s => s.id === selectedStepId)!}
-          isOpen={showStepConfig}
-          onClose={() => {
-            setShowStepConfig(false)
-            setSelectedStepId(undefined)
-          }}
-          onSave={handleStepConfigSave}
-        />
-      )}
+      {/* Step Configuration Modal (WB2 fix: safe step lookup) */}
+      {selectedStepId && (() => {
+        const selectedStep = steps.find(s => s.id === selectedStepId)
+        if (!selectedStep) return null
+        return (
+          <StepConfigModal
+            step={selectedStep}
+            isOpen={showStepConfig}
+            onClose={() => {
+              setShowStepConfig(false)
+              setSelectedStepId(undefined)
+            }}
+            onSave={handleStepConfigSave}
+          />
+        )
+      })()}
     </div>
   )
 }
