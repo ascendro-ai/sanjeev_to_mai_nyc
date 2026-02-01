@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useRef, useEffect, useMemo } from 'react'
-import { Circle } from 'lucide-react'
+import { Zap, Bot, GitBranch, CheckCircle, Webhook, Mail, Database, MessageSquare, Settings } from 'lucide-react'
 import type { WorkflowStep } from '@/types'
 
 interface WorkflowFlowchartProps {
@@ -11,103 +11,156 @@ interface WorkflowFlowchartProps {
   className?: string
 }
 
-const CARD_WIDTH = 240
-const CARD_HEIGHT = 140
-const HORIZONTAL_GAP = 280
-const VERTICAL_GAP = 220
-const CARDS_PER_ROW = 3
+const NODE_WIDTH = 180
+const NODE_HEIGHT = 60
+const HORIZONTAL_GAP = 120
+const VERTICAL_GAP = 100
 
-// Calculate position for serpentine layout
-function calculatePosition(index: number) {
-  const row = Math.floor(index / CARDS_PER_ROW)
-  const col = index % CARDS_PER_ROW
-  const isEvenRow = row % 2 === 0
+// Get icon for step type
+function getStepIcon(step: WorkflowStep) {
+  const iconClass = "w-5 h-5"
 
-  // For odd rows, reverse the column order
-  const actualCol = isEvenRow ? col : CARDS_PER_ROW - 1 - col
-
-  const x = actualCol * HORIZONTAL_GAP
-  const y = row * VERTICAL_GAP
-
-  return { x, y, row, col: actualCol, isEvenRow }
-}
-
-// Get card styling based on assignment
-function getCardStyles(step: WorkflowStep) {
-  const baseStyles = {
-    width: `${CARD_WIDTH}px`,
-    height: `${CARD_HEIGHT}px`,
-    backgroundColor: '#F9FAFB',
-    borderColor: '#9CA3AF',
-    borderRadius: '0.5rem',
-    borderWidth: '2px',
-    borderStyle: 'solid' as const,
-    color: '#1F2937',
-    boxShadow: '0 1px 3px 0 rgba(0, 0, 0, 0.1)',
-  }
-
-  // AI-assigned steps: greyish blue
-  if (step.assignedTo?.type === 'ai') {
-    return {
-      ...baseStyles,
-      backgroundColor: '#C4D1E3',
-      borderColor: '#9BA8BA',
-      borderStyle: step.type === 'decision' ? 'dashed' as const : 'solid' as const,
-    }
-  }
-
-  // Human-assigned steps: peach
-  if (step.assignedTo?.type === 'human') {
-    return {
-      ...baseStyles,
-      backgroundColor: '#F5C9B8',
-      borderColor: '#E8B5A0',
-      borderStyle: step.type === 'decision' ? 'dashed' as const : 'solid' as const,
-    }
-  }
-
-  // Unassigned: default to AI color
-  return {
-    ...baseStyles,
-    backgroundColor: '#C4D1E3',
-    borderColor: '#9BA8BA',
-    borderStyle: step.type === 'decision' ? 'dashed' as const : 'solid' as const,
-  }
-}
-
-// Get type label
-function getTypeLabel(type: string): string {
-  switch (type) {
+  switch (step.type) {
     case 'trigger':
-      return 'TRIGGER'
-    case 'action':
-      return 'ACTION'
+      if (step.label.toLowerCase().includes('email') || step.label.toLowerCase().includes('mail')) {
+        return <Mail className={iconClass} />
+      }
+      if (step.label.toLowerCase().includes('webhook') || step.label.toLowerCase().includes('form')) {
+        return <Webhook className={iconClass} />
+      }
+      return <Zap className={iconClass} />
     case 'decision':
-      return 'CHECK'
+      return <GitBranch className={iconClass} />
     case 'end':
-      return 'END'
+      return <CheckCircle className={iconClass} />
     case 'subworkflow':
-      return 'SUBFLOW'
+      return <Settings className={iconClass} />
     default:
-      return 'STEP'
+      if (step.assignedTo?.type === 'ai') {
+        return <Bot className={iconClass} />
+      }
+      if (step.label.toLowerCase().includes('database') || step.label.toLowerCase().includes('data')) {
+        return <Database className={iconClass} />
+      }
+      if (step.label.toLowerCase().includes('slack') || step.label.toLowerCase().includes('message') || step.label.toLowerCase().includes('notify')) {
+        return <MessageSquare className={iconClass} />
+      }
+      return <Bot className={iconClass} />
   }
 }
 
-// Check step status for badge display
-function getStepStatus(step: WorkflowStep): 'needs-attention' | 'complete' | null {
-  // Only show badges for action steps assigned to AI
-  if (step.type === 'trigger' || step.type === 'end') return null
+// Get node color based on type
+function getNodeColors(step: WorkflowStep) {
+  switch (step.type) {
+    case 'trigger':
+      return {
+        bg: 'bg-[#2a2a2a]',
+        border: 'border-[#ff6b6b]',
+        iconBg: 'bg-[#ff6b6b]/20',
+        iconColor: 'text-[#ff6b6b]',
+      }
+    case 'decision':
+      return {
+        bg: 'bg-[#2a2a2a]',
+        border: 'border-[#4ecdc4]',
+        iconBg: 'bg-[#4ecdc4]/20',
+        iconColor: 'text-[#4ecdc4]',
+      }
+    case 'end':
+      return {
+        bg: 'bg-[#2a2a2a]',
+        border: 'border-[#95e881]',
+        iconBg: 'bg-[#95e881]/20',
+        iconColor: 'text-[#95e881]',
+      }
+    default:
+      // AI agent or action - white outline for AI automations
+      const isAI = step.assignedTo?.type === 'ai' || !step.assignedTo
+      return {
+        bg: 'bg-[#2a2a2a]',
+        border: isAI ? 'border-white' : 'border-[#6c6c6c]',
+        iconBg: isAI ? 'bg-white/20' : 'bg-[#5c5c5c]',
+        iconColor: 'text-white',
+      }
+  }
+}
 
-  // Only show badges for AI-assigned steps
-  if (step.assignedTo?.type !== 'ai') return null
+// Calculate node positions for a serpentine flow layout
+// nodesPerRow is dynamic based on container width
+function calculatePositions(steps: WorkflowStep[], nodesPerRow: number = 4) {
+  const positions: Map<string, { x: number; y: number }> = new Map()
 
-  // If complete, show complete badge
-  if (step.requirements?.isComplete === true) {
-    return 'complete'
+  if (steps.length === 0) return positions
+
+  const startX = 50
+  const startY = 50
+
+  steps.forEach((step, index) => {
+    const row = Math.floor(index / nodesPerRow)
+    const posInRow = index % nodesPerRow
+    const isEvenRow = row % 2 === 0
+
+    // Serpentine: even rows go left-to-right, odd rows go right-to-left
+    let currentX: number
+    if (isEvenRow) {
+      currentX = startX + posInRow * (NODE_WIDTH + HORIZONTAL_GAP)
+    } else {
+      currentX = startX + (nodesPerRow - 1 - posInRow) * (NODE_WIDTH + HORIZONTAL_GAP)
+    }
+
+    const currentY = startY + row * (NODE_HEIGHT + VERTICAL_GAP)
+
+    positions.set(step.id, { x: currentX, y: currentY })
+  })
+
+  return positions
+}
+
+// Calculate bounding box of all nodes
+function getBoundingBox(positions: Map<string, { x: number; y: number }>) {
+  if (positions.size === 0) {
+    return { minX: 0, minY: 0, maxX: 0, maxY: 0, width: 0, height: 0 }
   }
 
-  // Default to "needs attention" for AI steps
-  return 'needs-attention'
+  const values = Array.from(positions.values())
+  const minX = Math.min(...values.map(p => p.x))
+  const minY = Math.min(...values.map(p => p.y))
+  const maxX = Math.max(...values.map(p => p.x)) + NODE_WIDTH
+  const maxY = Math.max(...values.map(p => p.y)) + NODE_HEIGHT
+
+  return {
+    minX,
+    minY,
+    maxX,
+    maxY,
+    width: maxX - minX,
+    height: maxY - minY,
+  }
+}
+
+// Generate bezier curve path between two points
+function generatePath(
+  x1: number,
+  y1: number,
+  x2: number,
+  y2: number,
+  fromIndex: number,
+  toIndex: number,
+  nodesPerRow: number
+): string {
+  const fromRow = Math.floor(fromIndex / nodesPerRow)
+  const toRow = Math.floor(toIndex / nodesPerRow)
+  const isRowTransition = fromRow !== toRow
+
+  // Row transition - curved diagonal going down
+  if (isRowTransition) {
+    const controlOffset = 60
+    return `M ${x1} ${y1} C ${x1} ${y1 + controlOffset}, ${x2} ${y2 - controlOffset}, ${x2} ${y2}`
+  }
+
+  // Same row - horizontal connection
+  const midX = (x1 + x2) / 2
+  return `M ${x1} ${y1} C ${midX} ${y1}, ${midX} ${y2}, ${x2} ${y2}`
 }
 
 export default function WorkflowFlowchart({
@@ -120,24 +173,84 @@ export default function WorkflowFlowchart({
     () => [...steps].sort((a, b) => a.order - b.order),
     [steps]
   )
-  const [hoveredStepId, setHoveredStepId] = useState<string | null>(null)
+
   const containerRef = useRef<HTMLDivElement>(null)
-  const [panState, setPanState] = useState({ x: 0, y: 0 })
+  const [containerSize, setContainerSize] = useState({ width: 800, height: 400 })
   const [isDragging, setIsDragging] = useState(false)
   const [dragStart, setDragStart] = useState({ x: 0, y: 0 })
-  const [wasDragging, setWasDragging] = useState(false)
+  const [manualPan, setManualPan] = useState<{ x: number; y: number } | null>(null)
+  const [manualScale, setManualScale] = useState<number | null>(null)
 
-  // Calculate container dimensions
-  const totalRows = Math.ceil(sortedSteps.length / CARDS_PER_ROW)
-  const containerWidth = CARDS_PER_ROW * HORIZONTAL_GAP
-  const containerHeight = totalRows * VERTICAL_GAP + CARD_HEIGHT
+  // Track container size
+  useEffect(() => {
+    if (!containerRef.current) return
 
-  // Handle mouse down for dragging
+    const resizeObserver = new ResizeObserver((entries) => {
+      const { width, height } = entries[0].contentRect
+      setContainerSize({ width, height })
+    })
+
+    resizeObserver.observe(containerRef.current)
+    return () => resizeObserver.disconnect()
+  }, [])
+
+  // Calculate optimal nodes per row based on container width
+  const nodesPerRow = useMemo(() => {
+    const availableWidth = containerSize.width - 100 // padding
+    const nodeWithGap = NODE_WIDTH + HORIZONTAL_GAP
+    const calculated = Math.floor(availableWidth / nodeWithGap)
+    return Math.max(2, Math.min(6, calculated)) // between 2 and 6 nodes per row
+  }, [containerSize.width])
+
+  const positions = useMemo(
+    () => calculatePositions(sortedSteps, nodesPerRow),
+    [sortedSteps, nodesPerRow]
+  )
+
+  const boundingBox = useMemo(() => getBoundingBox(positions), [positions])
+
+  // Calculate auto-fit scale and pan
+  const autoFit = useMemo(() => {
+    if (positions.size === 0) {
+      return { scale: 1, panX: 0, panY: 0 }
+    }
+
+    const padding = 60
+    const availableWidth = containerSize.width - padding * 2
+    const availableHeight = containerSize.height - padding * 2
+
+    const scaleX = availableWidth / boundingBox.width
+    const scaleY = availableHeight / boundingBox.height
+    const scale = Math.min(scaleX, scaleY, 1) // Don't scale up beyond 1
+
+    // Center the workflow
+    const scaledWidth = boundingBox.width * scale
+    const scaledHeight = boundingBox.height * scale
+    const panX = (containerSize.width - scaledWidth) / 2 - boundingBox.minX * scale
+    const panY = (containerSize.height - scaledHeight) / 2 - boundingBox.minY * scale
+
+    return { scale, panX, panY }
+  }, [positions.size, containerSize, boundingBox])
+
+  // Use manual values if set, otherwise auto-fit
+  const scale = manualScale ?? autoFit.scale
+  const panState = manualPan ?? { x: autoFit.panX, y: autoFit.panY }
+
+  // Reset to auto-fit when steps change
+  useEffect(() => {
+    setManualPan(null)
+    setManualScale(null)
+  }, [sortedSteps.length])
+
+  // Calculate canvas dimensions
+  const canvasWidth = Math.max(1200, boundingBox.maxX + 200)
+  const canvasHeight = Math.max(600, boundingBox.maxY + 200)
+
+  // Handle mouse down for panning
   const handleMouseDown = (e: React.MouseEvent) => {
     const target = e.target as HTMLElement
-    if (target.closest('.workflow-card')) {
-      return
-    }
+    if (target.closest('.workflow-node')) return
+
     setIsDragging(true)
     setDragStart({
       x: e.clientX - panState.x,
@@ -146,35 +259,19 @@ export default function WorkflowFlowchart({
     e.preventDefault()
   }
 
-  // Handle mouse move for dragging
-  const handleMouseMove = (e: React.MouseEvent) => {
-    if (!isDragging) return
-    setPanState({
-      x: e.clientX - dragStart.x,
-      y: e.clientY - dragStart.y,
-    })
+  // Handle wheel for zoom
+  const handleWheel = (e: React.WheelEvent) => {
+    e.preventDefault()
+    const delta = e.deltaY > 0 ? -0.1 : 0.1
+    const newScale = Math.min(Math.max(0.5, scale + delta), 2)
+    setManualScale(newScale)
   }
 
-  // Handle mouse up to stop dragging
-  const handleMouseUp = () => {
-    if (isDragging) {
-      setWasDragging(true)
-      setTimeout(() => setWasDragging(false), 100)
-    }
-    setIsDragging(false)
-  }
-
-  // Handle mouse leave to stop dragging
-  const handleMouseLeave = () => {
-    setIsDragging(false)
-  }
-
-  // Add global mouse event listeners for smooth dragging
   useEffect(() => {
     if (!isDragging) return
 
     const handleGlobalMouseMove = (e: MouseEvent) => {
-      setPanState({
+      setManualPan({
         x: e.clientX - dragStart.x,
         y: e.clientY - dragStart.y,
       })
@@ -193,46 +290,19 @@ export default function WorkflowFlowchart({
     }
   }, [isDragging, dragStart])
 
-  // Generate arrow paths
-  const arrows = useMemo(() => {
-    const result: Array<{
-      x1: number
-      y1: number
-      x2: number
-      y2: number
-      direction: 'right' | 'left' | 'down'
-    }> = []
+  // Generate connections between sequential steps
+  const connections = useMemo(() => {
+    const result: Array<{ from: string; to: string; fromIndex: number; toIndex: number; label?: string }> = []
 
     for (let i = 0; i < sortedSteps.length - 1; i++) {
-      const current = calculatePosition(i)
-      const next = calculatePosition(i + 1)
+      const current = sortedSteps[i]
+      const next = sortedSteps[i + 1]
 
-      if (current.row === next.row) {
-        // Same row: horizontal arrow
-        const arrowY = current.y + CARD_HEIGHT / 2
-        const arrowX1 = current.x + CARD_WIDTH
-        const arrowX2 = next.x
-
-        result.push({
-          x1: arrowX1,
-          y1: arrowY,
-          x2: arrowX2,
-          y2: arrowY,
-          direction: current.isEvenRow ? 'right' : 'left',
-        })
+      if (current.type === 'decision') {
+        // Decision nodes can have true/false branches
+        result.push({ from: current.id, to: next.id, fromIndex: i, toIndex: i + 1, label: 'true' })
       } else {
-        // Different row: vertical arrow
-        const arrowX = current.x + CARD_WIDTH / 2
-        const arrowY1 = current.y + CARD_HEIGHT
-        const arrowY2 = next.y
-
-        result.push({
-          x1: arrowX,
-          y1: arrowY1,
-          x2: arrowX,
-          y2: arrowY2,
-          direction: 'down',
-        })
+        result.push({ from: current.id, to: next.id, fromIndex: i, toIndex: i + 1 })
       }
     }
 
@@ -241,10 +311,21 @@ export default function WorkflowFlowchart({
 
   if (sortedSteps.length === 0) {
     return (
-      <div className={`flex items-center justify-center h-full text-gray-500 ${className}`}>
-        <div className="text-center">
-          <p className="text-lg font-medium">No steps yet</p>
-          <p className="text-sm mt-1">Start a conversation to design your workflow</p>
+      <div className={`relative w-full h-full bg-[#1a1a1a] ${className}`}>
+        {/* Dotted grid background */}
+        <div
+          className="absolute inset-0"
+          style={{
+            backgroundImage: 'radial-gradient(circle, #333 1px, transparent 1px)',
+            backgroundSize: '24px 24px',
+          }}
+        />
+
+        <div className="absolute inset-0 flex items-center justify-center">
+          <div className="text-center">
+            <p className="text-lg font-medium text-gray-400">No steps yet</p>
+            <p className="text-sm mt-1 text-gray-500">Start a conversation to design your workflow</p>
+          </div>
         </div>
       </div>
     )
@@ -253,162 +334,165 @@ export default function WorkflowFlowchart({
   return (
     <div
       ref={containerRef}
-      className={`relative w-full h-full overflow-hidden ${className}`}
+      className={`relative w-full h-full bg-[#1a1a1a] overflow-hidden ${className}`}
       onMouseDown={handleMouseDown}
-      onMouseMove={handleMouseMove}
-      onMouseUp={handleMouseUp}
-      onMouseLeave={handleMouseLeave}
+      onWheel={handleWheel}
       style={{ cursor: isDragging ? 'grabbing' : 'grab' }}
     >
+      {/* Dotted grid background */}
       <div
-        className="relative p-8"
+        className="absolute inset-0"
         style={{
-          minHeight: `${containerHeight}px`,
-          transform: `translate(${panState.x}px, ${panState.y}px)`,
+          backgroundImage: 'radial-gradient(circle, #333 1px, transparent 1px)',
+          backgroundSize: '24px 24px',
+        }}
+      />
+
+      {/* Canvas */}
+      <div
+        className="absolute"
+        style={{
+          transform: `translate(${panState.x}px, ${panState.y}px) scale(${scale})`,
+          transformOrigin: '0 0',
           transition: isDragging ? 'none' : 'transform 0.1s ease-out',
         }}
       >
+        {/* SVG for connections */}
         <svg
-          className="absolute inset-0 pointer-events-none"
-          width={containerWidth}
-          height={containerHeight}
-          style={{ left: 0, top: 0 }}
+          className="absolute pointer-events-none"
+          width={canvasWidth}
+          height={canvasHeight}
+          style={{ overflow: 'visible' }}
         >
-          {/* Arrow connectors */}
-          {arrows.map((arrow, index) => (
-            <g key={index}>
-              <line
-                x1={arrow.x1}
-                y1={arrow.y1}
-                x2={arrow.x2}
-                y2={arrow.y2}
-                stroke="#a855f7"
-                strokeWidth="2"
-                markerEnd="url(#arrowhead)"
-              />
-            </g>
-          ))}
-          {/* Arrowhead marker definition */}
           <defs>
             <marker
-              id="arrowhead"
+              id="arrowhead-dark"
               markerWidth="10"
               markerHeight="10"
-              refX="9"
-              refY="3"
+              refX="8"
+              refY="5"
               orient="auto"
             >
-              <polygon points="0 0, 10 3, 0 6" fill="#a855f7" />
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="#666" />
             </marker>
           </defs>
+
+          {connections.map((conn, index) => {
+            const fromPos = positions.get(conn.from)
+            const toPos = positions.get(conn.to)
+            if (!fromPos || !toPos) return null
+
+            const fromRow = Math.floor(conn.fromIndex / nodesPerRow)
+            const toRow = Math.floor(conn.toIndex / nodesPerRow)
+            const isRowTransition = fromRow !== toRow
+            const isFromEvenRow = fromRow % 2 === 0
+
+            let x1: number, y1: number, x2: number, y2: number
+
+            if (isRowTransition) {
+              // Row transition: exit from end of row, enter at same side of next row
+              if (isFromEvenRow) {
+                // Even row ends on right, next row (odd) starts on right
+                x1 = fromPos.x + NODE_WIDTH
+                x2 = toPos.x + NODE_WIDTH
+              } else {
+                // Odd row ends on left, next row (even) starts on left
+                x1 = fromPos.x
+                x2 = toPos.x
+              }
+              y1 = fromPos.y + NODE_HEIGHT / 2
+              y2 = toPos.y + NODE_HEIGHT / 2
+            } else {
+              // Same row
+              if (isFromEvenRow) {
+                // Even rows: left to right
+                x1 = fromPos.x + NODE_WIDTH
+                x2 = toPos.x
+              } else {
+                // Odd rows: right to left
+                x1 = fromPos.x
+                x2 = toPos.x + NODE_WIDTH
+              }
+              y1 = fromPos.y + NODE_HEIGHT / 2
+              y2 = toPos.y + NODE_HEIGHT / 2
+            }
+
+            return (
+              <g key={index}>
+                <path
+                  d={generatePath(x1, y1, x2, y2, conn.fromIndex, conn.toIndex, nodesPerRow)}
+                  fill="none"
+                  stroke="#555"
+                  strokeWidth="2"
+                  markerEnd="url(#arrowhead-dark)"
+                />
+                {conn.label && (
+                  <text
+                    x={(x1 + x2) / 2}
+                    y={(y1 + y2) / 2 - 10}
+                    fill="#888"
+                    fontSize="11"
+                    textAnchor="middle"
+                  >
+                    {conn.label}
+                  </text>
+                )}
+              </g>
+            )
+          })}
         </svg>
 
-        {/* Workflow cards */}
-        {sortedSteps.map((step, index) => {
-          const position = calculatePosition(index)
-          const styles = getCardStyles(step)
-          const isSelected = selectedStepId === step.id
-          const isHovered = hoveredStepId === step.id
-          const stepStatus = getStepStatus(step)
+        {/* Nodes */}
+        {sortedSteps.map((step) => {
+          const pos = positions.get(step.id)
+          if (!pos) return null
 
-          const boxShadow =
-            isHovered || isSelected
-              ? '0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05)'
-              : styles.boxShadow
+          const colors = getNodeColors(step)
+          const isSelected = selectedStepId === step.id
 
           return (
             <div
               key={step.id}
-              className="absolute cursor-pointer transition-all duration-200 workflow-card"
+              className={`workflow-node absolute cursor-pointer transition-all duration-200 ${colors.bg} ${colors.border} border-2 rounded-lg`}
               style={{
-                left: `${position.x}px`,
-                top: `${position.y}px`,
-                width: styles.width,
-                height: styles.height,
-                backgroundColor: styles.backgroundColor,
-                color: styles.color,
-                borderRadius: styles.borderRadius,
-                border: `${styles.borderWidth} ${styles.borderStyle} ${styles.borderColor}`,
-                boxShadow,
-                transform: isHovered ? 'translateY(-4px)' : 'translateY(0)',
-                zIndex: isSelected ? 10 : isHovered ? 5 : 1,
+                left: pos.x,
+                top: pos.y,
+                width: NODE_WIDTH,
+                height: NODE_HEIGHT,
+                boxShadow: isSelected
+                  ? '0 0 0 2px #3b82f6, 0 0 20px rgba(59,130,246,0.5)'
+                  : '0 4px 12px rgba(0,0,0,0.4)',
               }}
-              onClick={(e) => {
-                if (wasDragging || isDragging) {
-                  e.stopPropagation()
-                  return
-                }
-                onStepClick?.(step.id)
-              }}
-              onMouseEnter={() => setHoveredStepId(step.id)}
-              onMouseLeave={() => setHoveredStepId(null)}
+              onClick={() => onStepClick?.(step.id)}
             >
-              {/* Step number badge */}
-              <div
-                className="absolute -top-3 -left-3 w-8 h-8 rounded-full flex items-center justify-center text-sm font-semibold text-white shadow-md"
-                style={{
-                  backgroundColor:
-                    step.assignedTo?.type === 'human' ? '#E8B5A0' : '#9BA8BA',
-                }}
-              >
-                {index + 1}
-              </div>
+              {/* Connection dots */}
+              <div className="absolute -left-1.5 top-1/2 -translate-y-1/2 w-3 h-3 bg-[#555] rounded-full border-2 border-[#1a1a1a]" />
+              <div className="absolute -right-1.5 top-1/2 -translate-y-1/2 w-3 h-3 bg-[#555] rounded-full border-2 border-[#1a1a1a]" />
 
-              {/* Status badge */}
-              {stepStatus === 'needs-attention' && (
-                <div className="absolute top-2 right-2 z-20">
-                  <div
-                    className="px-3 py-1 rounded-full text-xs font-semibold text-white shadow-md"
-                    style={{ backgroundColor: '#F59E0B' }}
-                  >
-                    Needs Attention
-                  </div>
-                </div>
-              )}
-              {stepStatus === 'complete' && (
-                <div className="absolute top-2 right-2 z-20">
-                  <div
-                    className="px-3 py-1 rounded-full text-xs font-semibold text-white shadow-md"
-                    style={{ backgroundColor: '#10B981' }}
-                  >
-                    Ready
-                  </div>
-                </div>
-              )}
-
-              {/* Card content */}
-              <div className="h-full p-4 flex flex-col">
-                {/* Type label */}
-                <div className="flex items-center gap-1 mb-2">
-                  <span
-                    className="text-xs font-semibold uppercase tracking-wider"
-                    style={{ color: styles.color || '#6B7280' }}
-                  >
-                    {getTypeLabel(step.type)}
+              {/* Node content */}
+              <div className="flex items-center gap-3 h-full px-3">
+                <div className={`flex-shrink-0 w-8 h-8 rounded-md flex items-center justify-center ${colors.iconBg}`}>
+                  <span className={colors.iconColor}>
+                    {getStepIcon(step)}
                   </span>
-                  {step.type === 'decision' && (
-                    <div className="flex gap-1 ml-1">
-                      <Circle className="w-2 h-2 fill-current animate-pulse" />
-                      <Circle
-                        className="w-2 h-2 fill-current animate-pulse"
-                        style={{ animationDelay: '0.2s' }}
-                      />
-                      <Circle
-                        className="w-2 h-2 fill-current animate-pulse"
-                        style={{ animationDelay: '0.4s' }}
-                      />
-                    </div>
-                  )}
                 </div>
-
-                {/* Step label */}
-                <div className="flex-1 flex items-center">
-                  <p
-                    className="text-sm font-medium leading-tight line-clamp-3"
-                    style={{ color: styles.color || '#111827' }}
-                  >
+                <div className="flex-1 min-w-0">
+                  <p className="text-white text-sm font-medium truncate">
                     {step.label}
                   </p>
+                  <p className="text-gray-400 text-xs truncate">
+                    {step.type === 'trigger' ? 'Trigger' :
+                     step.type === 'decision' ? 'Condition' :
+                     step.type === 'end' ? 'End' :
+                     step.assignedTo?.type === 'ai' ? 'AI Agent' : 'Action'}
+                  </p>
+                </div>
+              </div>
+
+              {/* Add button */}
+              <div className="absolute -right-4 top-1/2 -translate-y-1/2 translate-x-full opacity-0 hover:opacity-100 transition-opacity">
+                <div className="w-6 h-6 bg-[#333] rounded border border-[#555] flex items-center justify-center text-gray-400 hover:text-white cursor-pointer">
+                  <span className="text-lg leading-none">+</span>
                 </div>
               </div>
             </div>
@@ -416,25 +500,31 @@ export default function WorkflowFlowchart({
         })}
       </div>
 
-      {/* Legend */}
-      <div className="absolute bottom-4 right-4 bg-white border border-gray-200 rounded-lg shadow-lg p-4 z-20 pointer-events-none">
-        <div className="text-xs font-semibold text-gray-700 mb-2">LEGEND</div>
-        <div className="space-y-2">
-          <div className="flex items-center gap-2">
-            <div
-              className="w-3 h-3 rounded-full"
-              style={{ backgroundColor: '#C4D1E3' }}
-            />
-            <span className="text-xs text-gray-600">AI Assigned</span>
-          </div>
-          <div className="flex items-center gap-2">
-            <div
-              className="w-3 h-3 rounded-full"
-              style={{ backgroundColor: '#F5C9B8' }}
-            />
-            <span className="text-xs text-gray-600">Human Assigned</span>
-          </div>
-        </div>
+      {/* Zoom controls */}
+      <div className="absolute bottom-4 right-4 flex items-center gap-2 bg-[#2a2a2a] rounded-lg border border-[#3a3a3a] p-1">
+        <button
+          onClick={() => setManualScale(Math.max(0.5, scale - 0.1))}
+          className="w-8 h-8 flex items-center justify-center text-gray-400 hover:text-white hover:bg-[#3a3a3a] rounded"
+        >
+          -
+        </button>
+        <span className="text-xs text-gray-400 w-12 text-center">{Math.round(scale * 100)}%</span>
+        <button
+          onClick={() => setManualScale(Math.min(2, scale + 0.1))}
+          className="w-8 h-8 flex items-center justify-center text-gray-400 hover:text-white hover:bg-[#3a3a3a] rounded"
+        >
+          +
+        </button>
+        <button
+          onClick={() => {
+            setManualScale(null)
+            setManualPan(null)
+          }}
+          className="px-2 h-8 flex items-center justify-center text-gray-400 hover:text-white hover:bg-[#3a3a3a] rounded text-xs"
+          title="Fit to view"
+        >
+          Fit
+        </button>
       </div>
     </div>
   )

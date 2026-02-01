@@ -120,7 +120,14 @@ async function n8nRequest<T>(options: N8NRequestOptions): Promise<T> {
         throw error
       }
 
-      return response.json()
+      // Handle empty responses (e.g., 204 No Content from DELETE)
+      const contentLength = response.headers.get('content-length')
+      if (contentLength === '0' || response.status === 204) {
+        return null
+      }
+
+      const text = await response.text()
+      return text ? JSON.parse(text) : null
     } catch (error) {
       // Handle network errors (no response)
       if (error instanceof TypeError && error.message.includes('fetch')) {
@@ -443,7 +450,7 @@ export function convertToN8NWorkflow(
     name: workflow.name,
     nodes,
     connections,
-    active: false,
+    // Note: 'active' is read-only in n8n API - use activateWorkflow() separately
     settings: {
       executionOrder: 'v1',
       saveManualExecutions: true,
@@ -453,6 +460,9 @@ export function convertToN8NWorkflow(
 
 /**
  * Create an n8n node from a workflow step
+ *
+ * PRIORITY: If user has explicitly configured an n8n node type and parameters
+ * via the StepConfigModal, use those. Otherwise fall back to automatic detection.
  */
 function createN8NNode(
   step: WorkflowStep,
@@ -461,6 +471,16 @@ function createN8NNode(
   platformWebhookUrl: string,
   workflowId: string
 ): N8NNode {
+  // FIRST: Check if user has explicitly configured an n8n node type
+  const userNodeType = step.requirements?.n8nNodeType
+  const userConfig = step.requirements?.n8nConfig || {}
+
+  if (userNodeType) {
+    // User has configured a specific n8n node - use it directly
+    return createUserConfiguredNode(step, nodeId, position, userNodeType, userConfig)
+  }
+
+  // FALLBACK: Use automatic node type detection based on step type
   switch (step.type) {
     case 'trigger':
       return createTriggerNode(step, nodeId, position, workflowId)
@@ -483,6 +503,174 @@ function createN8NNode(
     default:
       return createGenericNode(step, nodeId, position)
   }
+}
+
+/**
+ * Create an n8n node using user-configured node type and parameters.
+ * This is used when the user has explicitly selected a node type in StepConfigModal.
+ */
+function createUserConfiguredNode(
+  step: WorkflowStep,
+  nodeId: string,
+  position: [number, number],
+  nodeType: string,
+  config: Record<string, unknown>
+): N8NNode {
+  // Map the user's config to n8n parameters format
+  const parameters: Record<string, unknown> = {}
+
+  // Transform config based on node type
+  switch (nodeType) {
+    case 'n8n-nodes-base.gmail':
+      parameters.operation = config.operation || 'send'
+      if (config.to) parameters.sendTo = config.to
+      if (config.subject) parameters.subject = config.subject
+      if (config.message) parameters.message = config.message
+      if (config.ccEmail) parameters.ccEmail = config.ccEmail
+      if (config.bccEmail) parameters.bccEmail = config.bccEmail
+      break
+
+    case 'n8n-nodes-base.slack':
+      parameters.operation = config.operation || 'post'
+      if (config.channel) parameters.channel = config.channel
+      if (config.text) parameters.text = config.text
+      if (config.asUser !== undefined) parameters.asUser = config.asUser
+      break
+
+    case 'n8n-nodes-base.httpRequest':
+      parameters.method = config.method || 'GET'
+      parameters.url = config.url || ''
+      if (config.sendBody) {
+        parameters.sendBody = true
+        parameters.bodyParameters = {
+          parameters: Object.entries(config.body || {}).map(([name, value]) => ({
+            name,
+            value,
+          })),
+        }
+      }
+      if (config.authentication && config.authentication !== 'none') {
+        parameters.authentication = config.authentication
+      }
+      break
+
+    case 'n8n-nodes-base.googleSheets':
+      parameters.operation = config.operation || 'read'
+      if (config.documentId) parameters.documentId = { value: config.documentId, mode: 'id' }
+      if (config.sheetName) parameters.sheetName = { value: config.sheetName, mode: 'name' }
+      if (config.range) parameters.range = config.range
+      break
+
+    case 'n8n-nodes-base.scheduleTrigger':
+      parameters.rule = {
+        interval: [{
+          field: 'cronExpression',
+          expression: config.cronExpression || '0 9 * * *',
+        }],
+      }
+      break
+
+    case 'n8n-nodes-base.webhook':
+      parameters.path = config.path || step.id
+      parameters.httpMethod = config.httpMethod || 'POST'
+      parameters.responseMode = config.responseMode || 'onReceived'
+      break
+
+    case 'n8n-nodes-base.if':
+      parameters.conditions = {
+        options: { caseSensitive: true, leftValue: '', typeValidation: 'strict' },
+        conditions: [{
+          id: crypto.randomUUID(),
+          leftValue: config.value1 || '',
+          rightValue: config.value2 || '',
+          operator: mapIfOperator(config.operation as string, config.conditionType as string),
+        }],
+        combinator: 'and',
+      }
+      break
+
+    case 'n8n-nodes-base.openAi':
+      parameters.operation = config.operation || 'chat'
+      parameters.model = config.model || 'gpt-4'
+      if (config.prompt) parameters.prompt = config.prompt
+      if (config.maxTokens) parameters.maxTokens = config.maxTokens
+      if (config.temperature) parameters.temperature = config.temperature
+      break
+
+    case 'n8n-nodes-base.airtable':
+      parameters.operation = config.operation || 'list'
+      if (config.baseId) parameters.base = { value: config.baseId, mode: 'id' }
+      if (config.tableId) parameters.table = { value: config.tableId, mode: 'id' }
+      if (config.fields) parameters.fields = config.fields
+      break
+
+    case 'n8n-nodes-base.notion':
+      parameters.resource = config.resource || 'page'
+      parameters.operation = config.operation || 'get'
+      if (config.databaseId) parameters.databaseId = config.databaseId
+      if (config.pageId) parameters.pageId = config.pageId
+      if (config.title) parameters.title = config.title
+      if (config.content) parameters.content = config.content
+      break
+
+    default:
+      // For unknown node types, pass config as-is
+      Object.assign(parameters, config)
+  }
+
+  return {
+    id: nodeId,
+    name: step.label || nodeType.split('.')[1] || 'Step',
+    type: nodeType,
+    position,
+    parameters,
+    typeVersion: getNodeTypeVersion(nodeType),
+  }
+}
+
+/**
+ * Map IF node operator from our format to n8n format
+ */
+function mapIfOperator(operation: string, conditionType: string = 'string'): { type: string; operation: string } {
+  const typeMap: Record<string, string> = {
+    string: 'string',
+    number: 'number',
+    boolean: 'boolean',
+  }
+
+  const opMap: Record<string, string> = {
+    equal: 'equals',
+    notEqual: 'notEquals',
+    contains: 'contains',
+    larger: 'gt',
+    smaller: 'lt',
+  }
+
+  return {
+    type: typeMap[conditionType] || 'string',
+    operation: opMap[operation] || operation || 'equals',
+  }
+}
+
+/**
+ * Get the appropriate typeVersion for common n8n nodes
+ */
+function getNodeTypeVersion(nodeType: string): number {
+  const versionMap: Record<string, number> = {
+    'n8n-nodes-base.gmail': 2,
+    'n8n-nodes-base.slack': 2,
+    'n8n-nodes-base.httpRequest': 4.2,
+    'n8n-nodes-base.googleSheets': 4,
+    'n8n-nodes-base.scheduleTrigger': 1.2,
+    'n8n-nodes-base.webhook': 2,
+    'n8n-nodes-base.if': 2,
+    'n8n-nodes-base.openAi': 1,
+    'n8n-nodes-base.airtable': 2,
+    'n8n-nodes-base.notion': 2,
+    'n8n-nodes-base.manualTrigger': 1,
+    'n8n-nodes-base.noOp': 1,
+  }
+  return versionMap[nodeType] || 1
 }
 
 /**
